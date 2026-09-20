@@ -1,0 +1,1588 @@
+-- Check for table that is shared between executions.
+if not shared then
+	return warn("No shared, no script.")
+end
+
+-- Initialize Luraph globals if they do not exist.
+loadstring("getfenv().LPH_NO_VIRTUALIZE = function(...) return ... end")()
+
+getfenv().PP_SCRAMBLE_NUM = function(...) return ... end
+getfenv().PP_SCRAMBLE_STR = function(...) return ... end
+getfenv().PP_SCRAMBLE_RE_NUM = function(...) return ... end
+
+local AstroHub = {}
+
+-- Minimal maid for connection and instance cleanup.
+local Maid = {}
+Maid.__index = Maid
+
+---Create a new maid.
+function Maid.new()
+	return setmetatable({ items = {} }, Maid)
+end
+
+---Give an item to the maid.
+---@param item RBXScriptConnection|Instance|function
+function Maid:give(item)
+	table.insert(self.items, item)
+	return item
+end
+
+---Clean up every item.
+function Maid:clean()
+	for _, item in ipairs(self.items) do
+		local itemType = typeof(item)
+
+		if itemType == "RBXScriptConnection" then
+			item:Disconnect()
+		elseif itemType == "Instance" then
+			item:Destroy()
+		elseif itemType == "function" then
+			item()
+		end
+	end
+
+	self.items = {}
+end
+
+-- Constants.
+local MENU_TOGGLE_KEY = Enum.KeyCode.RightShift
+local MIN_RAY_LENGTH = 50
+local CONFIG_FOLDER = "AstroHub"
+local CONFIG_PATH = CONFIG_FOLDER .. "/config.json"
+local GUN_NAMES = { "M9", "Remington 870", "AK-47" }
+local GUN_MODS = { AutoFire = true, FireRate = 0.05, Spread = 0, ReloadTime = 0.1 }
+local RAY_METHODS = {
+	FindPartOnRay = true,
+	FindPartOnRayWithIgnoreList = true,
+	FindPartOnRayWithWhitelist = true,
+}
+
+local THEME_PRESETS = {
+	{ name = "Astro", accent = Color3.fromRGB(122, 108, 255) },
+	{ name = "Ocean", accent = Color3.fromRGB(56, 170, 255) },
+	{ name = "Crimson", accent = Color3.fromRGB(255, 82, 100) },
+	{ name = "Emerald", accent = Color3.fromRGB(52, 211, 153) },
+	{ name = "Sunset", accent = Color3.fromRGB(255, 152, 72) },
+}
+
+local THEME_NAMES = {}
+for _, preset in ipairs(THEME_PRESETS) do
+	table.insert(THEME_NAMES, preset.name)
+end
+
+local THEME = {
+	background = Color3.fromRGB(14, 14, 20),
+	card = Color3.fromRGB(24, 24, 34),
+	element = Color3.fromRGB(36, 36, 50),
+	accent = THEME_PRESETS[1].accent,
+	text = Color3.fromRGB(235, 235, 245),
+	subText = Color3.fromRGB(145, 145, 165),
+	stroke = Color3.fromRGB(44, 44, 60),
+}
+
+-- Services.
+local playersService = game:GetService("Players")
+local runService = game:GetService("RunService")
+local userInputService = game:GetService("UserInputService")
+local tweenService = game:GetService("TweenService")
+local httpService = game:GetService("HttpService")
+local statsService = game:GetService("Stats")
+local coreGui = game:GetService("CoreGui")
+
+-- State.
+local localPlayer = playersService.LocalPlayer
+local wallParams = RaycastParams.new()
+wallParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local State = {
+	detached = false,
+	holdingGun = false,
+	target = nil,
+	fovCircle = nil,
+	gui = nil,
+	watermark = nil,
+	accentGradient = nil,
+	fps = 60,
+	lastWatermark = 0,
+	lastModScan = 0,
+	layoutOrder = 0,
+	esp = {},
+	accentBound = {},
+	refreshers = {},
+	moddedTools = setmetatable({}, { __mode = "k" }),
+	maid = Maid.new(),
+	config = {
+		espEnabled = false,
+		espBoxes = true,
+		espNames = true,
+		espHealth = true,
+		espDistance = true,
+		espTracers = false,
+		espMaxDistance = 1500,
+		silentAimEnabled = false,
+		fovVisible = true,
+		fovRadius = 450,
+		wallCheck = false,
+		teamCheck = false,
+		hitPart = "Head",
+		gunMods = false,
+		speedEnabled = false,
+		walkSpeed = 32,
+		jumpEnabled = false,
+		jumpPower = 60,
+		noclip = false,
+		infiniteJump = false,
+		theme = "Astro",
+		watermark = true,
+	},
+}
+
+-- Player ESP object.
+local PlayerEsp = {}
+PlayerEsp.__index = PlayerEsp
+
+---Create a new ESP object for a player.
+---@param player Player
+function PlayerEsp.new(player)
+	local self = setmetatable({}, PlayerEsp)
+	self.player = player
+
+	self.box = Drawing.new("Square")
+	self.box.Thickness = 1
+	self.box.Filled = false
+
+	self.label = Drawing.new("Text")
+	self.label.Size = 13
+	self.label.Center = true
+	self.label.Outline = true
+	self.label.Color = Color3.fromRGB(255, 255, 255)
+
+	self.healthBar = Drawing.new("Line")
+	self.healthBar.Thickness = 2
+
+	self.tracer = Drawing.new("Line")
+	self.tracer.Thickness = 1
+
+	return self
+end
+
+---Hide every drawing.
+function PlayerEsp:hide()
+	self.box.Visible = false
+	self.label.Visible = false
+	self.healthBar.Visible = false
+	self.tracer.Visible = false
+end
+
+---Update the drawings for this frame.
+function PlayerEsp:update()
+	local config = State.config
+	local camera = workspace.CurrentCamera
+	local character = self.player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+	if not (config.espEnabled and camera and humanoid and hrp and humanoid.Health > 0) then
+		return self:hide()
+	end
+
+	local distance = (camera.CFrame.Position - hrp.Position).Magnitude
+	if distance > config.espMaxDistance then
+		return self:hide()
+	end
+
+	-- Drawing objects use viewport coordinates.
+	local rootPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+	if not onScreen then
+		return self:hide()
+	end
+
+	local topPos = camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
+	local bottomPos = camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3.5, 0))
+	local height = math.abs(bottomPos.Y - topPos.Y)
+	local width = height * 0.6
+	local color = self.player.TeamColor.Color
+
+	self.box.Visible = config.espBoxes
+	self.box.Color = color
+	self.box.Size = Vector2.new(width, height)
+	self.box.Position = Vector2.new(rootPos.X - width / 2, topPos.Y)
+
+	local labelText = config.espNames and self.player.Name or ""
+	if config.espDistance then
+		labelText = labelText .. " [" .. math.floor(distance) .. "m]"
+	end
+
+	self.label.Visible = labelText ~= ""
+	self.label.Text = labelText
+	self.label.Position = Vector2.new(rootPos.X, topPos.Y - 16)
+
+	local ratio = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+	local barX = rootPos.X - width / 2 - 5
+
+	self.healthBar.Visible = config.espHealth
+	self.healthBar.Color = Color3.fromRGB(255, 0, 0):Lerp(Color3.fromRGB(0, 255, 0), ratio)
+	self.healthBar.From = Vector2.new(barX, topPos.Y + height)
+	self.healthBar.To = Vector2.new(barX, topPos.Y + height - height * ratio)
+
+	self.tracer.Visible = config.espTracers
+	self.tracer.Color = color
+	self.tracer.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+	self.tracer.To = Vector2.new(rootPos.X, topPos.Y + height)
+end
+
+---Destroy every drawing.
+function PlayerEsp:destroy()
+	self.box:Remove()
+	self.label:Remove()
+	self.healthBar:Remove()
+	self.tracer:Remove()
+end
+
+---Add an ESP object for a player.
+---@param player Player
+local function addEsp(player)
+	if player == localPlayer or State.esp[player] then
+		return
+	end
+
+	State.esp[player] = PlayerEsp.new(player)
+end
+
+---Remove the ESP object of a player.
+---@param player Player
+local function removeEsp(player)
+	local esp = State.esp[player]
+	if not esp then
+		return
+	end
+
+	esp:destroy()
+	State.esp[player] = nil
+end
+
+---Check whether the target part is visible from the camera.
+---@param character Model
+---@param part BasePart
+---@return boolean
+local function isVisible(character, part)
+	local camera = workspace.CurrentCamera
+	local origin = camera.CFrame.Position
+	local filter = { camera }
+
+	if localPlayer.Character then
+		table.insert(filter, localPlayer.Character)
+	end
+
+	wallParams.FilterDescendantsInstances = filter
+
+	local result = workspace:Raycast(origin, part.Position - origin, wallParams)
+	return result == nil or result.Instance:IsDescendantOf(character)
+end
+
+---Return the player whose HumanoidRootPart projects closest to the screen center within fovRadius.
+---@return Player?, number?, table
+local function getClosestPlayer()
+	local closest, closestDist, candidates = nil, math.huge, {}
+	local currentCamera = workspace.CurrentCamera
+	local screenCenter = currentCamera.ViewportSize / 2
+	local fovRadius = State.config.fovRadius
+
+	for _, player in ipairs(playersService:GetPlayers()) do
+		if player == localPlayer then continue end
+		if State.config.teamCheck and player.Team == localPlayer.Team then continue end
+
+		local character = player.Character
+		if not character then continue end
+
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character:FindFirstChild("Humanoid")
+		if not (hrp and humanoid and humanoid.Health > 0) then continue end
+
+		local screenPos, onScreen = currentCamera:WorldToViewportPoint(hrp.Position)
+		if not onScreen then continue end
+
+		if State.config.wallCheck and not isVisible(character, hrp) then continue end
+
+		local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+		if dist <= fovRadius then
+			table.insert(candidates, { player = player, dist = dist, screenPos = screenPos })
+		end
+	end
+
+	for _, info in ipairs(candidates) do
+		if info.dist < closestDist then
+			closest = info.player
+			closestDist = info.dist
+		end
+	end
+
+	return closest, closestDist, candidates
+end
+
+---Return the part to aim at for a player.
+---@param player Player
+---@return BasePart?
+local function getAimPart(player)
+	local character = player.Character
+	if not character then
+		return nil
+	end
+
+	return character:FindFirstChild(State.config.hitPart) or character:FindFirstChild("HumanoidRootPart")
+end
+
+---Check whether the local player is holding a tool.
+---@return boolean
+local function isHoldingGun()
+	local character = localPlayer.Character
+	return character ~= nil and character:FindFirstChildOfClass("Tool") ~= nil
+end
+
+---Check whether a value looks like the shot table a gun sends to the server.
+---@param value any
+---@return boolean
+local function isShotTable(value)
+	if typeof(value) ~= "table" then
+		return false
+	end
+
+	local first = value[1]
+	return typeof(first) == "table" and typeof(first.Hit) == "Instance"
+end
+
+---Rewrite the shot table sent to the server so every shot hits the target part.
+---@param shots table
+---@param part BasePart
+---@return table
+local function retargetShots(shots, part)
+	local retargeted = {}
+	local camera = workspace.CurrentCamera
+
+	for index, shot in ipairs(shots) do
+		if typeof(shot) ~= "table" then
+			retargeted[index] = shot
+			continue
+		end
+
+		local newShot = table.clone(shot)
+		local origin = shot.RayObject and shot.RayObject.Origin or camera.CFrame.Position
+
+		newShot.RayObject = Ray.new(origin, part.Position - origin)
+		newShot.Distance = (part.Position - origin).Magnitude
+		newShot.Cframe = part.CFrame
+		newShot.Hit = part
+
+		retargeted[index] = newShot
+	end
+
+	return retargeted
+end
+
+---Install the silent aim hooks.
+local function installSilentAim()
+	local mouse = localPlayer:GetMouse()
+
+	local oldNamecall
+	oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+		local target = State.target
+
+		if State.detached or not target or not State.config.silentAimEnabled or checkcaller() then
+			return oldNamecall(self, ...)
+		end
+
+		-- Redirect the hit data the gun sends to the server.
+		if method == "FireServer" and typeof(self) == "Instance" then
+			local args = table.pack(...)
+
+			if isShotTable(args[1]) or (typeof(args[1]) == "table" and self.Name == "ShootEvent") then
+				args[1] = retargetShots(args[1], target.part)
+				return oldNamecall(self, table.unpack(args, 1, args.n))
+			end
+		end
+
+		if not State.holdingGun then
+			return oldNamecall(self, ...)
+		end
+
+		-- Redirect the ray the gun builds from the cursor.
+		if method == "ScreenPointToRay" or method == "ViewportPointToRay" then
+			if self == workspace.CurrentCamera then
+				local ray = oldNamecall(self, ...)
+				return Ray.new(ray.Origin, (target.part.Position - ray.Origin).Unit * ray.Direction.Magnitude)
+			end
+		end
+
+		-- Redirect the bullet rays cast by the gun.
+		if self == workspace then
+			if RAY_METHODS[method] then
+				local args = table.pack(...)
+				local ray = args[1]
+
+				if typeof(ray) == "Ray" and ray.Direction.Magnitude >= MIN_RAY_LENGTH then
+					args[1] = Ray.new(ray.Origin, (target.part.Position - ray.Origin).Unit * ray.Direction.Magnitude)
+					return oldNamecall(self, table.unpack(args, 1, args.n))
+				end
+			elseif method == "Raycast" then
+				local args = table.pack(...)
+				local origin, direction = args[1], args[2]
+
+				if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" and direction.Magnitude >= MIN_RAY_LENGTH then
+					args[2] = (target.part.Position - origin).Unit * direction.Magnitude
+					return oldNamecall(self, table.unpack(args, 1, args.n))
+				end
+			end
+		end
+
+		return oldNamecall(self, ...)
+	end))
+
+	-- Spoof the mouse for guns that aim with Mouse.Hit or Mouse.Target.
+	local oldIndex
+	oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+		if self ~= mouse then
+			return oldIndex(self, key)
+		end
+
+		local target = State.target
+		if State.detached or not target or not State.config.silentAimEnabled or not State.holdingGun or checkcaller() then
+			return oldIndex(self, key)
+		end
+
+		if key == "Hit" then
+			return CFrame.new(target.part.Position)
+		elseif key == "Target" then
+			return target.part
+		end
+
+		return oldIndex(self, key)
+	end))
+end
+
+---Apply the gun mods to a tool.
+---@param tool Tool
+local function applyGunMods(tool)
+	local module = tool:FindFirstChild("GunStates")
+	if not module then
+		return
+	end
+
+	-- Drop identity so the game module cannot see our environment.
+	setthreadidentity(2)
+	local success, states = pcall(require, module)
+	setthreadidentity(8)
+
+	if not success or typeof(states) ~= "table" then
+		return
+	end
+
+	for key, value in pairs(GUN_MODS) do
+		if states[key] ~= nil then
+			states[key] = value
+		end
+	end
+
+	State.moddedTools[tool] = true
+end
+
+---Apply the gun mods to every unmodded tool in a container.
+---@param container Instance?
+local function modContainer(container)
+	if not container then
+		return
+	end
+
+	for _, tool in ipairs(container:GetChildren()) do
+		if tool:IsA("Tool") and not State.moddedTools[tool] then
+			applyGunMods(tool)
+		end
+	end
+end
+
+---Request every gun from the prison giver.
+local function grabGuns()
+	local remote = workspace:FindFirstChild("Remote")
+	local itemHandler = remote and remote:FindFirstChild("ItemHandler")
+	local items = workspace:FindFirstChild("Prison_ITEMS")
+	local giver = items and items:FindFirstChild("giver")
+
+	if not (itemHandler and giver) then
+		return warn("Gun givers not found.")
+	end
+
+	for _, gunName in ipairs(GUN_NAMES) do
+		local gun = giver:FindFirstChild(gunName)
+		local pickup = gun and gun:FindFirstChild("ITEMPICKUP")
+
+		if pickup then
+			pcall(itemHandler.InvokeServer, itemHandler, pickup)
+		end
+	end
+end
+
+---Return the current server ping in milliseconds.
+---@return number
+local function getPing()
+	local success, ping = pcall(function()
+		return statsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+	end)
+
+	return success and math.floor(ping) or 0
+end
+
+---Update the watermark text.
+---@param deltaTime number
+local function updateWatermark(deltaTime)
+	local watermark = State.watermark
+	if not watermark then
+		return
+	end
+
+	watermark.frame.Visible = State.config.watermark
+	if not State.config.watermark then
+		return
+	end
+
+	-- Smooth the fps so the number stays readable.
+	State.fps = State.fps + (1 / math.max(deltaTime, 0.001) - State.fps) * 0.1
+
+	if os.clock() - State.lastWatermark < 0.25 then
+		return
+	end
+
+	State.lastWatermark = os.clock()
+
+	local text = string.format("Astro Hub  |  %d fps  |  %d ms", math.floor(State.fps + 0.5), getPing())
+	if State.target then
+		text = text .. "  |  Target: " .. State.target.player.Name
+	end
+
+	watermark.label.Text = text
+end
+
+---Runs every frame.
+---@param deltaTime number
+local function onRender(deltaTime)
+	if State.detached then
+		return
+	end
+
+	local config = State.config
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+
+	-- Pick the silent aim target for this frame.
+	State.target = nil
+	State.holdingGun = isHoldingGun()
+
+	if config.silentAimEnabled then
+		local closest = getClosestPlayer()
+		local part = closest and getAimPart(closest)
+
+		if part then
+			State.target = { player = closest, part = part }
+		end
+	end
+
+	-- The FOV circle always sits in the center of the screen.
+	local fovCircle = State.fovCircle
+	fovCircle.Visible = config.silentAimEnabled and config.fovVisible
+	fovCircle.Radius = config.fovRadius
+	fovCircle.Position = camera.ViewportSize / 2
+	fovCircle.Color = State.target and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 255, 255)
+
+	for _, esp in pairs(State.esp) do
+		esp:update()
+	end
+
+	updateWatermark(deltaTime)
+end
+
+---Runs every physics step.
+local function onStepped()
+	if State.detached then
+		return
+	end
+
+	local config = State.config
+	local character = localPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	if config.speedEnabled then
+		humanoid.WalkSpeed = config.walkSpeed
+	end
+
+	if config.jumpEnabled then
+		humanoid.UseJumpPower = true
+		humanoid.JumpPower = config.jumpPower
+	end
+
+	if config.noclip then
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = false
+			end
+		end
+	end
+end
+
+---Runs every heartbeat.
+local function onHeartbeat()
+	if State.detached or not State.config.gunMods then
+		return
+	end
+
+	-- Throttle the scan since new guns appear rarely.
+	if os.clock() - State.lastModScan < 1 then
+		return
+	end
+
+	State.lastModScan = os.clock()
+
+	modContainer(localPlayer.Character)
+	modContainer(localPlayer:FindFirstChildOfClass("Backpack"))
+end
+
+---Return the next layout order.
+---@return number
+local function nextOrder()
+	State.layoutOrder += 1
+	return State.layoutOrder
+end
+
+---Create an instance with properties.
+---@param className string
+---@param properties table
+---@param parent Instance
+---@return Instance
+local function create(className, properties, parent)
+	local instance = Instance.new(className)
+
+	for property, value in pairs(properties) do
+		instance[property] = value
+	end
+
+	instance.Parent = parent
+	return instance
+end
+
+---Tween an instance to a goal.
+---@param instance Instance
+---@param goal table
+---@param duration number?
+local function tween(instance, goal, duration)
+	local info = TweenInfo.new(duration or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	tweenService:Create(instance, info, goal):Play()
+end
+
+---Bind a property to the theme accent color.
+---@param instance Instance
+---@param property string
+local function bindAccent(instance, property)
+	instance[property] = THEME.accent
+	table.insert(State.accentBound, { instance = instance, property = property })
+end
+
+---Build the accent gradient sequence.
+---@return ColorSequence
+local function accentSequence()
+	return ColorSequence.new(THEME.accent, THEME.accent:Lerp(Color3.new(1, 1, 1), 0.4))
+end
+
+---Apply a theme preset to the whole interface.
+---@param name string
+local function applyTheme(name)
+	for _, preset in ipairs(THEME_PRESETS) do
+		if preset.name == name then
+			THEME.accent = preset.accent
+			break
+		end
+	end
+
+	for _, entry in ipairs(State.accentBound) do
+		tween(entry.instance, { [entry.property] = THEME.accent }, 0.25)
+	end
+
+	if State.accentGradient then
+		State.accentGradient.Color = accentSequence()
+	end
+
+	for _, refresh in ipairs(State.refreshers) do
+		refresh()
+	end
+end
+
+---Save the config to disk.
+---@return boolean
+local function saveConfig()
+	return (pcall(function()
+		if not isfolder(CONFIG_FOLDER) then
+			makefolder(CONFIG_FOLDER)
+		end
+
+		writefile(CONFIG_PATH, httpService:JSONEncode(State.config))
+	end))
+end
+
+---Load the config from disk.
+---@return boolean
+local function loadConfig()
+	local success, decoded = pcall(function()
+		if not isfile(CONFIG_PATH) then
+			return nil
+		end
+
+		return httpService:JSONDecode(readfile(CONFIG_PATH))
+	end)
+
+	if not success or typeof(decoded) ~= "table" then
+		return false
+	end
+
+	-- Only accept keys that exist with the same type.
+	for key, value in pairs(decoded) do
+		if typeof(State.config[key]) == typeof(value) then
+			State.config[key] = value
+		end
+	end
+
+	applyTheme(State.config.theme)
+	return true
+end
+
+---Check whether an input is a click or a touch.
+---@param input InputObject
+---@return boolean
+local function isPointerInput(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---Make a frame draggable by its handle.
+---@param handle GuiObject
+---@param frame GuiObject
+local function makeDraggable(handle, frame)
+	local dragging, dragStart, startPosition = false, nil, nil
+
+	State.maid:give(handle.InputBegan:Connect(function(input)
+		if not isPointerInput(input) then return end
+
+		dragging = true
+		dragStart = input.Position
+		startPosition = frame.Position
+	end))
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		local delta = input.Position - dragStart
+		frame.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+	end))
+
+	State.maid:give(userInputService.InputEnded:Connect(function(input)
+		if isPointerInput(input) then
+			dragging = false
+		end
+	end))
+end
+
+---Add a left aligned label to a row.
+---@param row GuiObject
+---@param text string
+---@return TextLabel
+local function addRowLabel(row, text)
+	return create("TextLabel", {
+		Size = UDim2.new(1, -90, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = text,
+	}, row)
+end
+
+---Add a card that groups elements.
+---@param page GuiObject
+---@param title string
+---@return Frame
+local function addSection(page, title)
+	local card = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, page)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 8) }, card)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, card)
+	create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, card)
+	create("UIPadding", {
+		PaddingTop = UDim.new(0, 8),
+		PaddingBottom = UDim.new(0, 10),
+		PaddingLeft = UDim.new(0, 10),
+		PaddingRight = UDim.new(0, 10),
+	}, card)
+
+	local header = create("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = string.upper(title),
+		LayoutOrder = nextOrder(),
+	}, card)
+
+	bindAccent(header, "TextColor3")
+	return card
+end
+
+---Add a switch bound to a config key.
+---@param card Frame
+---@param label string
+---@param key string
+local function addToggle(card, label, key)
+	local row = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, 28),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = nextOrder(),
+	}, card)
+
+	addRowLabel(row, label)
+
+	local track = create("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromOffset(38, 20),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+	}, row)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+	local knob = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, track)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local function refresh()
+		local enabled = State.config[key]
+
+		tween(track, { BackgroundColor3 = enabled and THEME.accent or THEME.element })
+		tween(knob, { Position = enabled and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) })
+	end
+
+	State.maid:give(row.MouseButton1Click:Connect(function()
+		State.config[key] = not State.config[key]
+		refresh()
+	end))
+
+	table.insert(State.refreshers, refresh)
+	refresh()
+end
+
+---Add a slider bound to a config key.
+---@param card Frame
+---@param label string
+---@param key string
+---@param minimum number
+---@param maximum number
+---@param step number
+local function addSlider(card, label, key, minimum, maximum, step)
+	local holder = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, card)
+
+	addRowLabel(holder, label).Size = UDim2.new(1, -70, 0, 16)
+
+	local valueLabel = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromOffset(60, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, holder)
+
+	local hitbox = create("Frame", {
+		Position = UDim2.fromOffset(0, 20),
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+	}, holder)
+
+	local bar = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 6),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+	}, hitbox)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+
+	local fill = create("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BorderSizePixel = 0,
+	}, bar)
+
+	bindAccent(fill, "BackgroundColor3")
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+
+	local knob = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0, 0.5),
+		Size = UDim2.fromOffset(12, 12),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, bar)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local function refresh()
+		local value = State.config[key]
+		local alpha = math.clamp((value - minimum) / (maximum - minimum), 0, 1)
+
+		valueLabel.Text = tostring(value)
+		fill.Size = UDim2.fromScale(alpha, 1)
+		knob.Position = UDim2.fromScale(alpha, 0.5)
+	end
+
+	local function updateFromInput(input)
+		local alpha = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		local value = minimum + (maximum - minimum) * alpha
+
+		State.config[key] = math.clamp(math.floor(value / step + 0.5) * step, minimum, maximum)
+		refresh()
+	end
+
+	local sliding = false
+
+	State.maid:give(hitbox.InputBegan:Connect(function(input)
+		if not isPointerInput(input) then return end
+
+		sliding = true
+		updateFromInput(input)
+	end))
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		if not sliding then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		updateFromInput(input)
+	end))
+
+	State.maid:give(userInputService.InputEnded:Connect(function(input)
+		if isPointerInput(input) then
+			sliding = false
+		end
+	end))
+
+	table.insert(State.refreshers, refresh)
+	refresh()
+end
+
+---Add a selector that cycles through options.
+---@param card Frame
+---@param label string
+---@param key string
+---@param options table
+---@param onChange function?
+local function addCycle(card, label, key, options, onChange)
+	local row = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, 28),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = nextOrder(),
+	}, card)
+
+	addRowLabel(row, label)
+
+	local chip = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromOffset(84, 22),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+	}, row)
+
+	bindAccent(chip, "TextColor3")
+	create("UICorner", { CornerRadius = UDim.new(0, 6) }, chip)
+
+	local function refresh()
+		chip.Text = State.config[key]
+	end
+
+	State.maid:give(row.MouseButton1Click:Connect(function()
+		local index = table.find(options, State.config[key]) or 0
+
+		State.config[key] = options[index % #options + 1]
+		refresh()
+
+		if onChange then
+			onChange(State.config[key])
+		end
+	end))
+
+	table.insert(State.refreshers, refresh)
+	refresh()
+end
+
+---Add a button.
+---@param card Frame
+---@param text string
+---@param callback function
+local function addButton(card, text, callback)
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		Text = text,
+		LayoutOrder = nextOrder(),
+	}, card)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 6) }, button)
+
+	State.maid:give(button.MouseEnter:Connect(function()
+		tween(button, { BackgroundColor3 = THEME.accent })
+	end))
+
+	State.maid:give(button.MouseLeave:Connect(function()
+		tween(button, { BackgroundColor3 = THEME.element })
+	end))
+
+	State.maid:give(button.MouseButton1Click:Connect(callback))
+end
+
+---Add a wrapped info label.
+---@param card Frame
+---@param text string
+local function addInfo(card, text)
+	create("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = text,
+		LayoutOrder = nextOrder(),
+	}, card)
+end
+
+---Show a toast notification.
+---@param text string
+local function notify(text)
+	if State.detached or not State.gui then
+		return
+	end
+
+	local toast = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, 280, 1, -20),
+		Size = UDim2.fromOffset(250, 38),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		Text = text,
+	}, State.gui)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 8) }, toast)
+	create("UIStroke", { Color = THEME.accent, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, toast)
+
+	tween(toast, { Position = UDim2.new(1, -20, 1, -20) }, 0.25)
+
+	task.delay(3, function()
+		if State.detached then
+			return
+		end
+
+		tween(toast, { Position = UDim2.new(1, 280, 1, -20) }, 0.25)
+		task.delay(0.3, function()
+			if not State.detached then
+				toast:Destroy()
+			end
+		end)
+	end)
+end
+
+---Build the on-screen watermark.
+---@param screenGui ScreenGui
+local function createWatermark(screenGui)
+	local frame = create("Frame", {
+		Position = UDim2.fromOffset(16, 16),
+		Size = UDim2.fromOffset(0, 26),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = THEME.background,
+		BorderSizePixel = 0,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 6) }, frame)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, frame)
+
+	local accentBar = create("Frame", {
+		Size = UDim2.new(0, 3, 1, -10),
+		Position = UDim2.fromOffset(6, 5),
+		BorderSizePixel = 0,
+	}, frame)
+
+	bindAccent(accentBar, "BackgroundColor3")
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, accentBar)
+
+	local label = create("TextLabel", {
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		Text = "Astro Hub",
+	}, frame)
+
+	create("UIPadding", { PaddingLeft = UDim.new(0, 18), PaddingRight = UDim.new(0, 12) }, label)
+
+	State.watermark = { frame = frame, label = label }
+end
+
+---Build the menu.
+local function createMenu()
+	local screenGui = State.maid:give(create("ScreenGui", {
+		Name = "AstroHub",
+		ResetOnSpawn = false,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, gethui and gethui() or coreGui))
+
+	State.gui = screenGui
+
+	local mainFrame = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(560, 400),
+		BackgroundColor3 = THEME.background,
+		BorderSizePixel = 0,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, mainFrame)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, mainFrame)
+
+	local menuScale = create("UIScale", { Scale = 1 }, mainFrame)
+
+	-- Accent line across the top of the window.
+	local accentLine = create("Frame", {
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -24, 0, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	State.accentGradient = create("UIGradient", { Color = accentSequence() }, accentLine)
+
+	-- Title bar.
+	local titleBar = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundTransparency = 1,
+	}, mainFrame)
+
+	local titlePip = create("Frame", {
+		Position = UDim2.fromOffset(14, 14),
+		Size = UDim2.fromOffset(4, 14),
+		BorderSizePixel = 0,
+	}, titleBar)
+
+	bindAccent(titlePip, "BackgroundColor3")
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, titlePip)
+
+	local titleHolder = create("Frame", {
+		Position = UDim2.fromOffset(26, 0),
+		Size = UDim2.new(0, 300, 1, 0),
+		BackgroundTransparency = 1,
+	}, titleBar)
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, titleHolder)
+
+	create("TextLabel", {
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		TextColor3 = THEME.text,
+		Text = "Astro Hub",
+		LayoutOrder = 1,
+	}, titleHolder)
+
+	create("TextLabel", {
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		Text = "Prison Life",
+		LayoutOrder = 2,
+	}, titleHolder)
+
+	create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -46, 0, 0),
+		Size = UDim2.new(0, 160, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Text = "RightShift to hide",
+	}, titleBar)
+
+	local closeButton = create("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -12, 0.5, 0),
+		Size = UDim2.fromOffset(24, 24),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		Text = "X",
+	}, titleBar)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 6) }, closeButton)
+
+	State.maid:give(closeButton.MouseEnter:Connect(function()
+		tween(closeButton, { BackgroundColor3 = Color3.fromRGB(220, 70, 80) })
+	end))
+
+	State.maid:give(closeButton.MouseLeave:Connect(function()
+		tween(closeButton, { BackgroundColor3 = THEME.element })
+	end))
+
+	-- Dividers.
+	create("Frame", {
+		Position = UDim2.fromOffset(0, 40),
+		Size = UDim2.new(1, 0, 0, 1),
+		BackgroundColor3 = THEME.stroke,
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	create("Frame", {
+		Position = UDim2.fromOffset(124, 41),
+		Size = UDim2.new(0, 1, 1, -41),
+		BackgroundColor3 = THEME.stroke,
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	-- Sidebar with the tab buttons.
+	local sidebar = create("Frame", {
+		Position = UDim2.fromOffset(0, 41),
+		Size = UDim2.new(0, 124, 1, -66),
+		BackgroundTransparency = 1,
+	}, mainFrame)
+
+	create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, sidebar)
+	create("UIPadding", {
+		PaddingTop = UDim.new(0, 10),
+		PaddingLeft = UDim.new(0, 8),
+		PaddingRight = UDim.new(0, 8),
+	}, sidebar)
+
+	create("TextLabel", {
+		Position = UDim2.new(0, 0, 1, -24),
+		Size = UDim2.fromOffset(124, 20),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = THEME.subText,
+		Text = "Astro Hub v1.0",
+	}, mainFrame)
+
+	local pages, tabButtons, tabIndicators = {}, {}, {}
+
+	---Select a tab.
+	---@param name string
+	local function selectTab(name)
+		for tabName, page in pairs(pages) do
+			local active = tabName == name
+
+			page.Visible = active
+			tween(tabButtons[tabName], {
+				BackgroundTransparency = active and 0 or 1,
+				TextColor3 = active and THEME.text or THEME.subText,
+			})
+			tween(tabIndicators[tabName], { BackgroundTransparency = active and 0 or 1 })
+		end
+	end
+
+	---Add a tab and return its page.
+	---@param name string
+	---@return ScrollingFrame
+	local function addTab(name)
+		local button = create("TextButton", {
+			Size = UDim2.new(1, 0, 0, 34),
+			BackgroundColor3 = THEME.element,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			TextColor3 = THEME.subText,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Text = name,
+			LayoutOrder = nextOrder(),
+		}, sidebar)
+
+		create("UICorner", { CornerRadius = UDim.new(0, 6) }, button)
+		create("UIPadding", { PaddingLeft = UDim.new(0, 16) }, button)
+
+		local indicator = create("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, -10, 0.5, 0),
+			Size = UDim2.fromOffset(3, 16),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+		}, button)
+
+		bindAccent(indicator, "BackgroundColor3")
+		create("UICorner", { CornerRadius = UDim.new(1, 0) }, indicator)
+
+		local page = create("ScrollingFrame", {
+			Position = UDim2.fromOffset(125, 41),
+			Size = UDim2.new(1, -125, 1, -41),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 3,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			Visible = false,
+		}, mainFrame)
+
+		bindAccent(page, "ScrollBarImageColor3")
+		create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 10),
+			PaddingBottom = UDim.new(0, 10),
+			PaddingLeft = UDim.new(0, 10),
+			PaddingRight = UDim.new(0, 14),
+		}, page)
+
+		pages[name] = page
+		tabButtons[name] = button
+		tabIndicators[name] = indicator
+
+		State.maid:give(button.MouseButton1Click:Connect(function()
+			selectTab(name)
+		end))
+
+		return page
+	end
+
+	-- Aim tab.
+	local aimPage = addTab("Aim")
+
+	local silentCard = addSection(aimPage, "Silent Aim")
+	addToggle(silentCard, "Enabled", "silentAimEnabled")
+	addToggle(silentCard, "Show FOV Circle", "fovVisible")
+	addSlider(silentCard, "FOV Radius", "fovRadius", 50, 1000, 10)
+	addCycle(silentCard, "Hit Part", "hitPart", { "Head", "Torso" })
+
+	local filterCard = addSection(aimPage, "Filters")
+	addToggle(filterCard, "Team Check", "teamCheck")
+	addToggle(filterCard, "Wall Check", "wallCheck")
+
+	local gunCard = addSection(aimPage, "Guns")
+	addToggle(gunCard, "Gun Mods", "gunMods")
+	addButton(gunCard, "Get Guns", function()
+		task.spawn(grabGuns)
+		notify("Requested guns.")
+	end)
+
+	-- Visuals tab.
+	local visualsPage = addTab("Visuals")
+
+	local espCard = addSection(visualsPage, "ESP")
+	addToggle(espCard, "Enabled", "espEnabled")
+	addToggle(espCard, "Boxes", "espBoxes")
+	addToggle(espCard, "Names", "espNames")
+	addToggle(espCard, "Health Bar", "espHealth")
+	addToggle(espCard, "Distance", "espDistance")
+	addToggle(espCard, "Tracers", "espTracers")
+	addSlider(espCard, "Max Distance", "espMaxDistance", 100, 3000, 50)
+
+	-- Player tab.
+	local playerPage = addTab("Player")
+
+	local moveCard = addSection(playerPage, "Movement")
+	addToggle(moveCard, "Speed", "speedEnabled")
+	addSlider(moveCard, "Walk Speed", "walkSpeed", 16, 120, 1)
+	addToggle(moveCard, "Jump Power", "jumpEnabled")
+	addSlider(moveCard, "Jump Amount", "jumpPower", 50, 200, 5)
+
+	local abilityCard = addSection(playerPage, "Abilities")
+	addToggle(abilityCard, "Noclip", "noclip")
+	addToggle(abilityCard, "Infinite Jump", "infiniteJump")
+
+	-- Settings tab.
+	local settingsPage = addTab("Settings")
+
+	local interfaceCard = addSection(settingsPage, "Interface")
+	addCycle(interfaceCard, "Theme", "theme", THEME_NAMES, applyTheme)
+	addToggle(interfaceCard, "Watermark", "watermark")
+
+	local configCard = addSection(settingsPage, "Config")
+	addButton(configCard, "Save Config", function()
+		notify(saveConfig() and "Config saved." or "Could not save config.")
+	end)
+	addButton(configCard, "Load Config", function()
+		notify(loadConfig() and "Config loaded." or "No saved config found.")
+	end)
+
+	local scriptCard = addSection(settingsPage, "Script")
+	addInfo(scriptCard, "Press RightShift to show or hide the menu. Drag the title bar to move it.")
+	addButton(scriptCard, "Unload", function()
+		AstroHub.detach()
+	end)
+
+	selectTab("Aim")
+	makeDraggable(titleBar, mainFrame)
+	createWatermark(screenGui)
+
+	---Show or hide the menu with a small pop animation.
+	---@param visible boolean
+	local function setMenuVisible(visible)
+		mainFrame.Visible = visible
+
+		if visible then
+			menuScale.Scale = 0.92
+			tween(menuScale, { Scale = 1 }, 0.2)
+		end
+	end
+
+	State.maid:give(closeButton.MouseButton1Click:Connect(function()
+		setMenuVisible(false)
+		notify("Press RightShift to reopen.")
+	end))
+
+	-- Toggle the menu with the hotkey.
+	State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed or input.KeyCode ~= MENU_TOGGLE_KEY then
+			return
+		end
+
+		setMenuVisible(not mainFrame.Visible)
+	end))
+
+	setMenuVisible(true)
+	notify("Astro Hub loaded.")
+end
+
+---Initialize the script.
+function AstroHub.init()
+	if not game:IsLoaded() then
+		game.Loaded:Wait()
+	end
+
+	State.fovCircle = Drawing.new("Circle")
+	State.fovCircle.Thickness = 1.5
+	State.fovCircle.NumSides = 96
+	State.fovCircle.Filled = false
+
+	for _, player in ipairs(playersService:GetPlayers()) do
+		addEsp(player)
+	end
+
+	State.maid:give(playersService.PlayerAdded:Connect(addEsp))
+	State.maid:give(playersService.PlayerRemoving:Connect(removeEsp))
+	State.maid:give(runService.RenderStepped:Connect(onRender))
+	State.maid:give(runService.Stepped:Connect(onStepped))
+	State.maid:give(runService.Heartbeat:Connect(onHeartbeat))
+
+	State.maid:give(userInputService.JumpRequest:Connect(function()
+		if not State.config.infiniteJump then
+			return
+		end
+
+		local character = localPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+		if humanoid then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end))
+
+	createMenu()
+	installSilentAim()
+end
+
+---Detach the script and clean everything up.
+function AstroHub.detach()
+	State.detached = true
+	State.target = nil
+	State.maid:clean()
+
+	for _, esp in pairs(State.esp) do
+		esp:destroy()
+	end
+
+	State.esp = {}
+
+	if State.fovCircle then
+		State.fovCircle:Remove()
+		State.fovCircle = nil
+	end
+end
+
+---This is called when initialization errors.
+---@param error string
+local function onInitializeError(error)
+	warn("Failed to initialize.")
+	warn(error)
+	warn(debug.traceback())
+	AstroHub.detach()
+end
+
+-- Detach previous instances, including the old Prison Life build.
+for _, name in ipairs({ "PrisonLife", "AstroHub" }) do
+	if shared[name] then
+		shared[name].detach()
+	end
+end
+
+shared.AstroHub = AstroHub
+
+-- Safely initialize the script as well as handle errors.
+xpcall(AstroHub.init, onInitializeError)
