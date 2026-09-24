@@ -1,0 +1,2722 @@
+if not shared then
+return warn("No shared, no script.")
+end
+pcall(function()
+loadstring("getfenv().LPH_NO_VIRTUALIZE = function(...) return ... end")()
+getfenv().PP_SCRAMBLE_NUM = function(...) return ... end
+getfenv().PP_SCRAMBLE_STR = function(...) return ... end
+getfenv().PP_SCRAMBLE_RE_NUM = function(...) return ... end
+end)
+local AstraHub = {}
+local Maid = {}
+Maid.__index = Maid
+function Maid.new()
+return setmetatable({ items = {} }, Maid)
+end
+function Maid:give(item)
+table.insert(self.items, item)
+return item
+end
+function Maid:clean()
+for _, item in ipairs(self.items) do
+local itemType = typeof(item)
+if itemType == "RBXScriptConnection" then
+item:Disconnect()
+elseif itemType == "Instance" then
+item:Destroy()
+elseif itemType == "function" then
+item()
+end
+end
+self.items = {}
+end
+local VERSION = "v1.1"
+local MENU_TOGGLE_KEYS = { [Enum.KeyCode.RightShift] = true, [Enum.KeyCode.Insert] = true }
+local MIN_RAY_LENGTH = 50
+local DRAG_THRESHOLD = 6
+local SCROLL_THRESHOLD = 8
+local WHEEL_STEP = 70
+local AIM_MAX_DISTANCE = 400
+local STICKY_MARGIN = 0.7
+local INTRO_DURATION = 1.8
+local CONFIG_FOLDER = "AstraHub"
+local CONFIG_PATH = CONFIG_FOLDER .. "/mm2_config.json"
+local LOGO_PATH = CONFIG_FOLDER .. "/logo.jpg"
+local PRIORITY_MODES = { "Crosshair", "Distance", "Health" }
+local HIT_PARTS = { "Head", "Torso", "Auto", "Random" }
+local NORMAL_BOMB_NAME = "FakeBomb"
+local GOLD_BOMB_NAME = "GoldBomb"
+local BOMB_THROW_DISTANCE = 5
+local BOMB_FETCH_ATTEMPTS = 10
+local BOMB_UNEQUIP_DELAY = 0.5
+local BOMB_DEBOUNCE = 0.5
+local AIM_KEY_LOOKUP = { Q = Enum.KeyCode.Q, E = Enum.KeyCode.E, X = Enum.KeyCode.X, Z = Enum.KeyCode.Z, V = Enum.KeyCode.V }
+local AIM_KEY_NAMES = { "None", "Q", "E", "X", "Z", "V", "Mouse2" }
+local RAY_METHODS = {
+FindPartOnRay = true,
+FindPartOnRayWithIgnoreList = true,
+FindPartOnRayWithWhitelist = true,
+}
+local ROLE_COLORS = {
+Murderer = Color3.fromRGB(255, 70, 80),
+Sheriff = Color3.fromRGB(80, 150, 255),
+Innocent = Color3.fromRGB(120, 220, 140),
+}
+local THEME_PRESETS = {
+{ name = "Astra", accent = Color3.fromRGB(70, 140, 255), accent2 = Color3.fromRGB(168, 92, 255) },
+{ name = "Ocean", accent = Color3.fromRGB(45, 190, 255), accent2 = Color3.fromRGB(60, 120, 255) },
+{ name = "Crimson", accent = Color3.fromRGB(255, 80, 100), accent2 = Color3.fromRGB(255, 130, 70) },
+{ name = "Emerald", accent = Color3.fromRGB(45, 215, 150), accent2 = Color3.fromRGB(60, 190, 230) },
+{ name = "Sunset", accent = Color3.fromRGB(255, 150, 70), accent2 = Color3.fromRGB(255, 80, 140) },
+}
+local THEME_NAMES = {}
+for _, preset in ipairs(THEME_PRESETS) do
+table.insert(THEME_NAMES, preset.name)
+end
+local THEME = {
+background = Color3.fromRGB(11, 12, 19),
+card = Color3.fromRGB(19, 21, 32),
+element = Color3.fromRGB(31, 34, 50),
+accent = THEME_PRESETS[1].accent,
+accent2 = THEME_PRESETS[1].accent2,
+text = Color3.fromRGB(238, 240, 250),
+subText = Color3.fromRGB(140, 146, 170),
+stroke = Color3.fromRGB(38, 42, 62),
+success = Color3.fromRGB(80, 220, 140),
+danger = Color3.fromRGB(235, 80, 95),
+}
+local LOGO_DATA = [==[
+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
+]==]
+local playersService = game:GetService("Players")
+local runService = game:GetService("RunService")
+local userInputService = game:GetService("UserInputService")
+local tweenService = game:GetService("TweenService")
+local httpService = game:GetService("HttpService")
+local statsService = game:GetService("Stats")
+local replicatedStorageService = game:GetService("ReplicatedStorage")
+local coreGui = game:GetService("CoreGui")
+local setIdentity = setthreadidentity or set_thread_identity or (syn and syn.set_thread_identity)
+local wrapClosure = newcclosure or function(callback)
+return callback
+end
+local IS_TOUCH = userInputService.TouchEnabled and not userInputService.KeyboardEnabled
+local ROW_HEIGHT = IS_TOUCH and 38 or 30
+local TEXT_SIZE = IS_TOUCH and 14 or 13
+local TOAST_WIDTH = IS_TOUCH and 230 or 270
+local TOAST_MAX = 4
+local localPlayer = playersService.LocalPlayer
+local wallParams = RaycastParams.new()
+wallParams.FilterType = Enum.RaycastFilterType.Exclude
+local State = {
+detached = false,
+holdingGun = false,
+menuVisible = false,
+menuToken = 0,
+myRole = "Innocent",
+target = nil,
+lastTarget = nil,
+hitRoll = true,
+headRoll = true,
+nextRoll = 0,
+sliderActive = false,
+scrollTaken = false,
+lastScrollTime = 0,
+fovRing = nil,
+fovStroke = nil,
+targetLine = nil,
+targetDot = nil,
+gui = nil,
+guiParent = nil,
+noDrawing = false,
+errors = {},
+logoAsset = nil,
+introOverlay = nil,
+notifyHolder = nil,
+watermark = nil,
+roleChip = nil,
+profileRole = nil,
+bombController = nil,
+goldBombController = nil,
+aimButton = nil,
+bombQuickButton = nil,
+goldQuickButton = nil,
+syncInterface = nil,
+currentTab = nil,
+fps = 60,
+lastHud = 0,
+lastAimScan = 0,
+layoutOrder = 0,
+esp = {},
+toasts = {},
+pageNames = {},
+pageFrames = {},
+sections = {},
+searchEntries = {},
+accentBound = {},
+gradients = {},
+spinners = {},
+refreshers = {},
+maid = Maid.new(),
+config = {
+espEnabled = false,
+espBoxes = true,
+espNames = true,
+espRoles = true,
+espHealth = true,
+espDistance = true,
+espTracers = false,
+espChams = false,
+espMaxDistance = 1500,
+aimbotEnabled = false,
+fovVisible = true,
+fovRadius = 400,
+aimMaxDistance = 800,
+hitPart = "Head",
+hitChance = 100,
+priority = "Crosshair",
+stickyTarget = true,
+murdererOnly = true,
+wallCheck = false,
+targetLine = true,
+bombJumpEnabled = false,
+bombCooldown = 22,
+showBombButton = IS_TOUCH,
+goldBombJumpEnabled = false,
+goldBombCooldown = 4,
+showGoldButton = IS_TOUCH,
+aimKeybind = "None",
+showAimButton = IS_TOUCH,
+theme = "Astra",
+watermark = true,
+launcher = IS_TOUCH,
+uiScale = IS_TOUCH and 85 or 100,
+autoLoad = false,
+intro = true,
+},
+}
+local DEFAULT_CONFIG = table.clone(State.config)
+local function loadLogo()
+local success, asset = pcall(function()
+if not isfolder(CONFIG_FOLDER) then
+makefolder(CONFIG_FOLDER)
+end
+local decode = (crypt and crypt.base64decode) or base64decode
+writefile(LOGO_PATH, decode((string.gsub(LOGO_DATA, "%s", ""))))
+return getcustomasset(LOGO_PATH)
+end)
+return success and asset or nil
+end
+local function getRole(player)
+local character = player.Character
+if not character then
+return "Innocent"
+end
+if character:FindFirstChild("Knife") then
+return "Murderer"
+end
+if character:FindFirstChild("Gun") then
+return "Sheriff"
+end
+return "Innocent"
+end
+local function isHoldingGun()
+local character = localPlayer.Character
+return character ~= nil and character:FindFirstChild("Gun") ~= nil
+end
+local function isAimbotActive()
+return State.config.aimbotEnabled
+end
+local function invokeServerWithTimeout(remote, timeoutSeconds, ...)
+local args = table.pack(...)
+local finished = false
+local bindable = Instance.new("BindableEvent")
+task.spawn(function()
+pcall(function()
+remote:InvokeServer(table.unpack(args, 1, args.n))
+end)
+if not finished then
+finished = true
+bindable:Fire()
+end
+end)
+task.delay(timeoutSeconds, function()
+if not finished then
+finished = true
+bindable:Fire()
+end
+end)
+bindable.Event:Wait()
+bindable:Destroy()
+end
+local function findReplicateToyRemote()
+local remotes = replicatedStorageService:FindFirstChild("Remotes")
+local extras = remotes and remotes:FindFirstChild("Extras")
+return extras and extras:FindFirstChild("ReplicateToy")
+end
+local function createBombController(toyName, cooldownKey)
+local controller = {
+toyName = toyName,
+onCooldown = false,
+debounce = false,
+justRespawned = true,
+button = nil,
+defaultLabel = toyName == GOLD_BOMB_NAME and "GOLD" or "BOMB",
+}
+local function resetCooldown()
+controller.onCooldown = false
+if controller.button then
+controller.button.Text = controller.defaultLabel
+end
+end
+local function startCooldown()
+controller.onCooldown = true
+controller.debounce = false
+local duration = math.floor(State.config[cooldownKey])
+task.spawn(function()
+for seconds = duration, 1, -1 do
+if State.detached or not controller.onCooldown then
+return
+end
+if controller.button then
+controller.button.Text = tostring(seconds)
+end
+task.wait(1)
+end
+if not State.detached and controller.onCooldown then
+resetCooldown()
+end
+end)
+end
+function controller.isHolding()
+local character = localPlayer.Character
+return character ~= nil and character:FindFirstChild(toyName) ~= nil
+end
+local function getToy()
+local character = localPlayer.Character
+if not character then
+return nil
+end
+local tool = character:FindFirstChild(toyName)
+if tool then
+return tool
+end
+local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+if backpack then
+tool = backpack:FindFirstChild(toyName)
+if tool then
+tool.Parent = character
+return tool
+end
+end
+local replicateToy = findReplicateToyRemote()
+if not replicateToy then
+return nil
+end
+invokeServerWithTimeout(replicateToy, 3, toyName)
+for _ = 1, BOMB_FETCH_ATTEMPTS do
+tool = character:FindFirstChild(toyName)
+if tool then
+return tool
+end
+if backpack then
+tool = backpack:FindFirstChild(toyName)
+if tool then
+tool.Parent = character
+return tool
+end
+end
+task.wait(0.05)
+end
+return nil
+end
+local function unequip()
+task.delay(BOMB_UNEQUIP_DELAY, function()
+if State.detached then
+return
+end
+local character = localPlayer.Character
+local tool = character and character:FindFirstChild(toyName)
+if tool then
+tool.Parent = localPlayer:FindFirstChildOfClass("Backpack") or character
+end
+end)
+end
+function controller.throw()
+if State.detached or controller.onCooldown or controller.debounce or controller.justRespawned then
+return false
+end
+controller.debounce = true
+task.delay(BOMB_DEBOUNCE, function()
+controller.debounce = false
+end)
+local tool = getToy()
+if not tool then
+return false
+end
+local character = localPlayer.Character
+local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+local hrp = character and character:FindFirstChild("HumanoidRootPart")
+local camera = workspace.CurrentCamera
+if not (humanoid and hrp and camera) then
+return false
+end
+local position = hrp.Position + camera.CFrame.LookVector * BOMB_THROW_DISTANCE
+local remote = tool:FindFirstChild("Remote")
+if remote then
+pcall(function()
+remote:FireServer(CFrame.new(position), 50)
+end)
+end
+pcall(function()
+humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+end)
+unequip()
+task.delay(0.1, startCooldown)
+return true
+end
+State.maid:give(localPlayer.CharacterAdded:Connect(function()
+resetCooldown()
+controller.justRespawned = true
+task.delay(1, function()
+if not State.detached then
+controller.justRespawned = false
+end
+end)
+end))
+return controller
+end
+local function autoThrowIfHolding(controller, enabledKey)
+if State.config[enabledKey] and controller.isHolding() then
+controller.throw()
+end
+end
+local function newStubDrawing()
+return setmetatable({}, {
+__index = function(_, key)
+if key == "Remove" or key == "Destroy" then
+return function() end
+end
+end,
+__newindex = function() end,
+})
+end
+local function newDrawing(className)
+if not State.noDrawing then
+local success, drawing = pcall(function()
+return Drawing.new(className)
+end)
+if success and drawing then
+return drawing
+end
+State.noDrawing = true
+end
+return newStubDrawing()
+end
+local PlayerEsp = {}
+PlayerEsp.__index = PlayerEsp
+function PlayerEsp.new(player)
+local self = setmetatable({}, PlayerEsp)
+self.player = player
+self.highlight = nil
+self.tag = nil
+self.box = newDrawing("Square")
+self.box.Thickness = 1
+self.box.Filled = false
+self.label = newDrawing("Text")
+self.label.Size = 13
+self.label.Center = true
+self.label.Outline = true
+self.label.Color = Color3.fromRGB(255, 255, 255)
+self.healthBar = newDrawing("Line")
+self.healthBar.Thickness = 2
+self.tracer = newDrawing("Line")
+self.tracer.Thickness = 1
+return self
+end
+function PlayerEsp:hideDrawings()
+self.box.Visible = false
+self.label.Visible = false
+self.healthBar.Visible = false
+self.tracer.Visible = false
+end
+function PlayerEsp:hide()
+self:hideDrawings()
+if self.highlight then
+self.highlight.Enabled = false
+end
+if self.tag then
+self.tag.Enabled = false
+end
+end
+function PlayerEsp:updateChams(character, color)
+if not ((State.config.espChams or State.noDrawing) and State.guiParent) then
+if self.highlight then
+self.highlight.Enabled = false
+end
+return
+end
+local highlight = self.highlight
+if not highlight then
+highlight = Instance.new("Highlight")
+highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+highlight.FillTransparency = 0.65
+highlight.OutlineTransparency = 0
+highlight.OutlineColor = Color3.new(1, 1, 1)
+highlight.Parent = State.guiParent
+self.highlight = highlight
+end
+highlight.Adornee = character
+highlight.FillColor = color
+highlight.Enabled = true
+end
+function PlayerEsp:updateTag(character, text)
+local head = character:FindFirstChild("Head")
+if not (head and State.guiParent and text ~= "") then
+if self.tag then
+self.tag.Enabled = false
+end
+return
+end
+local tag = self.tag
+if not tag then
+tag = Instance.new("BillboardGui")
+tag.AlwaysOnTop = true
+tag.Size = UDim2.fromOffset(240, 22)
+tag.StudsOffset = Vector3.new(0, 2.6, 0)
+tag.Parent = State.guiParent
+local label = Instance.new("TextLabel")
+label.Name = "Label"
+label.Size = UDim2.fromScale(1, 1)
+label.BackgroundTransparency = 1
+label.Font = Enum.Font.GothamBold
+label.TextSize = 13
+label.TextColor3 = Color3.new(1, 1, 1)
+label.TextStrokeTransparency = 0
+label.Parent = tag
+self.tag = tag
+end
+tag.Adornee = head
+tag.Enabled = true
+tag.Label.Text = text
+end
+function PlayerEsp:update()
+local config = State.config
+local camera = workspace.CurrentCamera
+local character = self.player.Character
+local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+local hrp = character and character:FindFirstChild("HumanoidRootPart")
+if not (config.espEnabled and camera and humanoid and hrp and humanoid.Health > 0) then
+return self:hide()
+end
+local distance = (camera.CFrame.Position - hrp.Position).Magnitude
+if distance > config.espMaxDistance then
+return self:hide()
+end
+local role = getRole(self.player)
+local color = ROLE_COLORS[role] or Color3.fromRGB(220, 220, 220)
+self:updateChams(character, color)
+local parts = {}
+if config.espNames then
+table.insert(parts, self.player.Name)
+end
+if config.espRoles then
+table.insert(parts, "[" .. role .. "]")
+end
+if config.espDistance then
+table.insert(parts, "[" .. math.floor(distance) .. "m]")
+end
+local labelText = table.concat(parts, " ")
+if State.noDrawing then
+return self:updateTag(character, labelText)
+end
+local rootPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+if not onScreen then
+return self:hideDrawings()
+end
+local topPos = camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
+local bottomPos = camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3.5, 0))
+local height = math.abs(bottomPos.Y - topPos.Y)
+local width = height * 0.6
+self.box.Visible = config.espBoxes
+self.box.Color = color
+self.box.Size = Vector2.new(width, height)
+self.box.Position = Vector2.new(rootPos.X - width / 2, topPos.Y)
+self.label.Visible = labelText ~= ""
+self.label.Text = labelText
+self.label.Position = Vector2.new(rootPos.X, topPos.Y - 16)
+local ratio = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+local barX = rootPos.X - width / 2 - 5
+self.healthBar.Visible = config.espHealth
+self.healthBar.Color = Color3.fromRGB(255, 0, 0):Lerp(Color3.fromRGB(0, 255, 0), ratio)
+self.healthBar.From = Vector2.new(barX, topPos.Y + height)
+self.healthBar.To = Vector2.new(barX, topPos.Y + height - height * ratio)
+self.tracer.Visible = config.espTracers
+self.tracer.Color = color
+self.tracer.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+self.tracer.To = Vector2.new(rootPos.X, topPos.Y + height)
+end
+function PlayerEsp:destroy()
+self.box:Remove()
+self.label:Remove()
+self.healthBar:Remove()
+self.tracer:Remove()
+if self.highlight then
+self.highlight:Destroy()
+self.highlight = nil
+end
+if self.tag then
+self.tag:Destroy()
+self.tag = nil
+end
+end
+local function addEsp(player)
+if player == localPlayer or State.esp[player] then
+return
+end
+State.esp[player] = PlayerEsp.new(player)
+end
+local function removePlayer(player)
+local esp = State.esp[player]
+if not esp then
+return
+end
+esp:destroy()
+State.esp[player] = nil
+end
+local function isVisible(character, part)
+local camera = workspace.CurrentCamera
+local origin = camera.CFrame.Position
+local filter = { camera }
+if localPlayer.Character then
+table.insert(filter, localPlayer.Character)
+end
+wallParams.FilterDescendantsInstances = filter
+local result = workspace:Raycast(origin, part.Position - origin, wallParams)
+return result == nil or result.Instance:IsDescendantOf(character)
+end
+local function getScore(humanoid, screenDistance, worldDistance)
+local priority = State.config.priority
+if priority == "Distance" then
+return worldDistance
+end
+if priority == "Health" then
+return humanoid.Health
+end
+return screenDistance
+end
+local function getClosestPlayer()
+local closest, closestScore, candidates = nil, math.huge, {}
+local currentCamera = workspace.CurrentCamera
+local screenCenter = currentCamera.ViewportSize / 2
+local cameraPosition = currentCamera.CFrame.Position
+local config = State.config
+for _, player in ipairs(playersService:GetPlayers()) do
+if player == localPlayer then continue end
+local character = player.Character
+if not character then continue end
+local hrp = character:FindFirstChild("HumanoidRootPart")
+local humanoid = character:FindFirstChild("Humanoid")
+if not (hrp and humanoid and humanoid.Health > 0) then continue end
+if config.murdererOnly and getRole(player) ~= "Murderer" then continue end
+local worldDistance = (hrp.Position - cameraPosition).Magnitude
+if worldDistance > config.aimMaxDistance then continue end
+local screenPos, onScreen = currentCamera:WorldToViewportPoint(hrp.Position)
+if not onScreen then continue end
+local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+if dist > config.fovRadius then continue end
+if config.wallCheck and not isVisible(character, hrp) then continue end
+table.insert(candidates, {
+player = player,
+score = getScore(humanoid, dist, worldDistance),
+})
+end
+for _, info in ipairs(candidates) do
+if info.score < closestScore then
+closest = info.player
+closestScore = info.score
+end
+end
+local previous = State.lastTarget
+if config.stickyTarget and previous and closest ~= previous then
+for _, info in ipairs(candidates) do
+if info.player == previous then
+if closestScore >= info.score * STICKY_MARGIN then
+closest = previous
+end
+break
+end
+end
+end
+return closest
+end
+local function getAimPart(player)
+local character = player.Character
+if not character then
+return nil
+end
+local mode = State.config.hitPart
+local head = character:FindFirstChild("Head")
+local torso = character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+if mode == "Torso" then
+return torso
+end
+if mode == "Random" then
+return (State.headRoll and head) or torso
+end
+if mode == "Auto" then
+if head and isVisible(character, head) then
+return head
+end
+return torso
+end
+return head or torso
+end
+local function isShotTable(value)
+if typeof(value) ~= "table" then
+return false
+end
+local first = value[1]
+return typeof(first) == "table" and typeof(first.Hit) == "Instance"
+end
+local function redirectDirection(origin, direction, position)
+local offset = position - origin
+if offset.Magnitude < 0.001 then
+return direction
+end
+return offset.Unit * direction.Magnitude
+end
+local function retargetShots(shots, part)
+local retargeted = {}
+local camera = workspace.CurrentCamera
+for index, shot in ipairs(shots) do
+if typeof(shot) ~= "table" then
+retargeted[index] = shot
+continue
+end
+local newShot = table.clone(shot)
+local ray = shot.RayObject
+local origin = typeof(ray) == "Ray" and ray.Origin or camera.CFrame.Position
+newShot.RayObject = Ray.new(origin, part.Position - origin)
+newShot.Distance = (part.Position - origin).Magnitude
+newShot.Cframe = part.CFrame
+newShot.Hit = part
+retargeted[index] = newShot
+end
+return retargeted
+end
+local function installAimbot()
+local mouse = localPlayer:GetMouse()
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", wrapClosure(function(self, ...)
+local method = getnamecallmethod()
+local target = State.target
+if State.detached or not target or not State.hitRoll or not isAimbotActive() or not State.holdingGun or checkcaller() then
+return oldNamecall(self, ...)
+end
+local targetPart = target.part
+if method == "FireServer" and typeof(self) == "Instance" then
+local args = table.pack(...)
+if isShotTable(args[1]) or (typeof(args[1]) == "table" and self.Name == "ShootEvent") then
+local success, retargeted = pcall(retargetShots, args[1], targetPart)
+if success then
+args[1] = retargeted
+return oldNamecall(self, table.unpack(args, 1, args.n))
+end
+end
+end
+if method == "ScreenPointToRay" or method == "ViewportPointToRay" then
+if self == workspace.CurrentCamera then
+local ray = oldNamecall(self, ...)
+return Ray.new(ray.Origin, redirectDirection(ray.Origin, ray.Direction, targetPart.Position))
+end
+end
+if self == workspace then
+if RAY_METHODS[method] then
+local args = table.pack(...)
+local ray = args[1]
+if typeof(ray) == "Ray" and ray.Direction.Magnitude >= MIN_RAY_LENGTH then
+args[1] = Ray.new(ray.Origin, redirectDirection(ray.Origin, ray.Direction, targetPart.Position))
+return oldNamecall(self, table.unpack(args, 1, args.n))
+end
+elseif method == "Raycast" then
+local args = table.pack(...)
+local origin, direction = args[1], args[2]
+if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" and direction.Magnitude >= MIN_RAY_LENGTH then
+args[2] = redirectDirection(origin, direction, targetPart.Position)
+return oldNamecall(self, table.unpack(args, 1, args.n))
+end
+end
+end
+return oldNamecall(self, ...)
+end))
+local oldIndex
+oldIndex = hookmetamethod(game, "__index", wrapClosure(function(self, key)
+if self ~= mouse then
+return oldIndex(self, key)
+end
+local target = State.target
+if State.detached or not target or not State.hitRoll or not isAimbotActive() or not State.holdingGun or checkcaller() then
+return oldIndex(self, key)
+end
+if key == "Hit" then
+return CFrame.new(target.part.Position)
+elseif key == "Target" then
+return target.part
+end
+return oldIndex(self, key)
+end))
+end
+local function refreshAll()
+for _, refresh in ipairs(State.refreshers) do
+refresh()
+end
+end
+local function installAimKeybind()
+State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+if gameProcessed then
+return
+end
+local bind = State.config.aimKeybind
+if bind == "None" then
+return
+end
+local matches = (bind == "Mouse2" and input.UserInputType == Enum.UserInputType.MouseButton2)
+or input.KeyCode == AIM_KEY_LOOKUP[bind]
+if matches then
+State.config.aimbotEnabled = not State.config.aimbotEnabled
+refreshAll()
+end
+end))
+end
+local function getPing()
+local success, ping = pcall(function()
+return statsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+end)
+return success and math.floor(ping) or 0
+end
+local function updateHud(deltaTime)
+State.fps = State.fps + (1 / math.max(deltaTime, 0.001) - State.fps) * 0.1
+if os.clock() - State.lastHud < 0.25 then
+return
+end
+State.lastHud = os.clock()
+local role = State.myRole
+if State.roleChip then
+State.roleChip.Text = role
+State.roleChip.TextColor3 = ROLE_COLORS[role]
+end
+if State.profileRole then
+State.profileRole.Text = role
+State.profileRole.TextColor3 = ROLE_COLORS[role]
+end
+local watermark = State.watermark
+if not watermark then
+return
+end
+watermark.frame.Visible = State.config.watermark
+if not State.config.watermark then
+return
+end
+local text = string.format("Astra Hub  |  %d fps  |  %d ms  |  %s", math.floor(State.fps + 0.5), getPing(), role)
+if State.target then
+text = text .. "  |  Target: " .. State.target.player.Name
+end
+watermark.label.Text = text
+end
+local function onRender(deltaTime)
+if State.detached then
+return
+end
+local config = State.config
+local camera = workspace.CurrentCamera
+if not camera then
+return
+end
+State.myRole = getRole(localPlayer)
+State.holdingGun = isHoldingGun()
+if os.clock() >= State.nextRoll then
+State.nextRoll = os.clock() + 0.35
+State.hitRoll = math.random(1, 100) <= config.hitChance
+State.headRoll = math.random() < 0.6
+end
+State.target = nil
+if isAimbotActive() and State.holdingGun then
+local closest = getClosestPlayer()
+local part = closest and getAimPart(closest)
+if part then
+State.target = { player = closest, part = part }
+end
+State.lastTarget = closest
+else
+State.lastTarget = nil
+end
+local screenCenter = camera.ViewportSize / 2
+local fovRing = State.fovRing
+if fovRing then
+fovRing.Visible = isAimbotActive() and config.fovVisible and State.holdingGun
+fovRing.Size = UDim2.fromOffset(config.fovRadius * 2, config.fovRadius * 2)
+fovRing.Position = UDim2.fromOffset(screenCenter.X, screenCenter.Y)
+State.fovStroke.Color = State.target and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 255, 255)
+end
+if State.targetLine and State.targetDot then
+local targetScreen = State.target and camera:WorldToViewportPoint(State.target.part.Position)
+local showLine = config.targetLine and targetScreen ~= nil
+State.targetLine.Visible = showLine
+State.targetDot.Visible = showLine
+if showLine then
+local delta = Vector2.new(targetScreen.X, targetScreen.Y) - screenCenter
+local midpoint = screenCenter + delta / 2
+State.targetLine.Size = UDim2.fromOffset(delta.Magnitude, 2)
+State.targetLine.Position = UDim2.fromOffset(midpoint.X, midpoint.Y)
+State.targetLine.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+State.targetDot.Position = UDim2.fromOffset(targetScreen.X, targetScreen.Y)
+end
+end
+for _, esp in pairs(State.esp) do
+esp:update()
+end
+for _, gradient in ipairs(State.spinners) do
+gradient.Rotation = (gradient.Rotation + deltaTime * 60) % 360
+end
+if State.pulses then
+local now = os.clock()
+for _, pulse in ipairs(State.pulses) do
+pulse.scale.Scale = 1 + math.sin(now * pulse.speed) * pulse.amount
+end
+end
+local scrollingEnabled = not (State.sliderActive or State.scrollTaken)
+for _, page in pairs(State.pageFrames) do
+if page.ScrollingEnabled ~= scrollingEnabled then
+page.ScrollingEnabled = scrollingEnabled
+end
+end
+updateHud(deltaTime)
+end
+local function nextOrder()
+State.layoutOrder += 1
+return State.layoutOrder
+end
+local function create(className, properties, parent)
+local instance = Instance.new(className)
+for property, value in pairs(properties) do
+instance[property] = value
+end
+instance.Parent = parent
+return instance
+end
+local function tween(instance, goal, duration, style)
+local info = TweenInfo.new(duration or 0.15, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local playing = tweenService:Create(instance, info, goal)
+playing:Play()
+return playing
+end
+local function bindAccent(instance, property)
+instance[property] = THEME.accent
+table.insert(State.accentBound, { instance = instance, property = property })
+end
+local function accentSequence()
+return ColorSequence.new(THEME.accent, THEME.accent2)
+end
+local function registerGradient(gradient, spin)
+gradient.Color = accentSequence()
+table.insert(State.gradients, gradient)
+if spin then
+table.insert(State.spinners, gradient)
+end
+return gradient
+end
+local function applyTheme(name)
+for _, preset in ipairs(THEME_PRESETS) do
+if preset.name == name then
+THEME.accent = preset.accent
+THEME.accent2 = preset.accent2
+break
+end
+end
+for _, entry in ipairs(State.accentBound) do
+tween(entry.instance, { [entry.property] = THEME.accent }, 0.25)
+end
+for _, gradient in ipairs(State.gradients) do
+gradient.Color = accentSequence()
+end
+refreshAll()
+end
+local function syncConfig()
+applyTheme(State.config.theme)
+if State.syncInterface then
+State.syncInterface()
+end
+end
+local function saveConfig()
+return (pcall(function()
+if not isfolder(CONFIG_FOLDER) then
+makefolder(CONFIG_FOLDER)
+end
+writefile(CONFIG_PATH, httpService:JSONEncode(State.config))
+end))
+end
+local function loadConfig(onlyIfAuto)
+local success, decoded = pcall(function()
+if not isfile(CONFIG_PATH) then
+return nil
+end
+return httpService:JSONDecode(readfile(CONFIG_PATH))
+end)
+if not success or typeof(decoded) ~= "table" then
+return false
+end
+if onlyIfAuto and decoded.autoLoad ~= true then
+return false
+end
+for key, value in pairs(decoded) do
+if typeof(State.config[key]) == typeof(value) then
+State.config[key] = value
+end
+end
+syncConfig()
+return true
+end
+local function resetConfig()
+for key, value in pairs(DEFAULT_CONFIG) do
+State.config[key] = value
+end
+syncConfig()
+end
+local function isPointerInput(input)
+return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+local function installBombTapListener()
+State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+if gameProcessed or not isPointerInput(input) then
+return
+end
+if State.bombController then
+autoThrowIfHolding(State.bombController, "bombJumpEnabled")
+end
+if State.goldBombController then
+autoThrowIfHolding(State.goldBombController, "goldBombJumpEnabled")
+end
+end))
+end
+local function isScrolling()
+return os.clock() - State.lastScrollTime < 0.2
+end
+local function keepOnScreen(frame)
+local camera = workspace.CurrentCamera
+if not camera then
+return
+end
+local viewport = camera.ViewportSize
+local position, size = frame.AbsolutePosition, frame.AbsoluteSize
+local margin = 44
+local shiftX, shiftY = 0, 0
+if position.X + size.X < margin then
+shiftX = margin - (position.X + size.X)
+elseif position.X > viewport.X - margin then
+shiftX = (viewport.X - margin) - position.X
+end
+if position.Y < 0 then
+shiftY = -position.Y
+elseif position.Y > viewport.Y - margin then
+shiftY = (viewport.Y - margin) - position.Y
+end
+if shiftX ~= 0 or shiftY ~= 0 then
+frame.Position = frame.Position + UDim2.fromOffset(shiftX, shiftY)
+end
+end
+local function makeDraggable(handle, frame, onClick)
+local dragging, dragInput, dragStart, startPosition, moved = false, nil, nil, nil, false
+State.maid:give(handle.InputBegan:Connect(function(input)
+if not isPointerInput(input) then return end
+dragging = true
+moved = false
+dragInput = input
+dragStart = input.Position
+startPosition = frame.Position
+end))
+State.maid:give(userInputService.InputChanged:Connect(function(input)
+if not dragging then return end
+if input ~= dragInput and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+local delta = input.Position - dragStart
+if not moved and delta.Magnitude < DRAG_THRESHOLD then return end
+moved = true
+frame.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+end))
+State.maid:give(userInputService.InputEnded:Connect(function(input)
+if not dragging then return end
+if input ~= dragInput and not isPointerInput(input) then return end
+dragging = false
+if moved then
+keepOnScreen(frame)
+elseif onClick then
+onClick()
+end
+end))
+end
+local function addLogo(parent, size)
+if State.logoAsset then
+local image = create("ImageLabel", {
+Size = UDim2.fromOffset(size, size),
+BackgroundColor3 = Color3.fromRGB(8, 8, 16),
+BorderSizePixel = 0,
+Image = State.logoAsset,
+ScaleType = Enum.ScaleType.Crop,
+}, parent)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, image)
+return image
+end
+local letter = create("TextLabel", {
+Size = UDim2.fromOffset(size, size),
+Font = Enum.Font.GothamBlack,
+TextSize = math.floor(size * 0.55),
+TextColor3 = Color3.new(1, 1, 1),
+Text = "A",
+BorderSizePixel = 0,
+}, parent)
+bindAccent(letter, "BackgroundColor3")
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, letter)
+return letter
+end
+local function addPulse(gui, amount, speed)
+local scale = create("UIScale", { Scale = 1 }, gui)
+State.pulses = State.pulses or {}
+table.insert(State.pulses, { scale = scale, amount = amount, speed = speed })
+return scale
+end
+local function addRowLabel(row, text)
+return create("TextLabel", {
+Size = UDim2.new(1, -110, 1, 0),
+Position = UDim2.fromOffset(6, 0),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamMedium,
+TextSize = TEXT_SIZE,
+TextColor3 = THEME.text,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = text,
+}, row)
+end
+local function playRipple(gui, input)
+if State.detached then
+return
+end
+local scale = State.config.uiScale / 100
+local size = gui.AbsoluteSize / scale
+local x = math.clamp((input.Position.X - gui.AbsolutePosition.X) / scale, 0, size.X)
+local diameter = math.max(size.X, size.Y) * 1.6
+local ripple = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.new(0, x, 0.5, 0),
+Size = UDim2.fromOffset(0, 0),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BackgroundTransparency = 0.82,
+BorderSizePixel = 0,
+ZIndex = 5,
+}, gui)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, ripple)
+tween(ripple, { Size = UDim2.fromOffset(diameter, diameter), BackgroundTransparency = 1 }, 0.5)
+task.delay(0.55, function()
+ripple:Destroy()
+end)
+end
+local function addRipple(gui)
+gui.ClipsDescendants = true
+State.maid:give(gui.InputBegan:Connect(function(input)
+if isPointerInput(input) then
+playRipple(gui, input)
+end
+end))
+end
+local function setScrollingEnabled(enabled)
+for _, page in pairs(State.pageFrames) do
+page.ScrollingEnabled = enabled
+end
+end
+local function addSection(page, title)
+local card = create("Frame", {
+Size = UDim2.new(1, 0, 0, 0),
+AutomaticSize = Enum.AutomaticSize.Y,
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+LayoutOrder = nextOrder(),
+}, page)
+create("UICorner", { CornerRadius = UDim.new(0, 10) }, card)
+create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, card)
+create("UIGradient", { Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(205, 205, 220)), Rotation = 90 }, card)
+create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
+local header = create("TextButton", {
+Size = UDim2.new(1, 0, 0, ROW_HEIGHT + 2),
+BackgroundTransparency = 1,
+AutoButtonColor = false,
+Text = "",
+LayoutOrder = 1,
+}, card)
+addRipple(header)
+local dot = create("Frame", {
+AnchorPoint = Vector2.new(0, 0.5),
+Position = UDim2.new(0, 12, 0.5, 0),
+Size = UDim2.fromOffset(6, 6),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BorderSizePixel = 0,
+}, header)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, dot)
+registerGradient(create("UIGradient", { Rotation = 45 }, dot))
+create("TextLabel", {
+Position = UDim2.fromOffset(26, 0),
+Size = UDim2.new(1, -56, 1, 0),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBold,
+TextSize = 12,
+TextColor3 = THEME.text,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = string.upper(title),
+}, header)
+local arrow = create("TextLabel", {
+AnchorPoint = Vector2.new(1, 0.5),
+Position = UDim2.new(1, -14, 0.5, 0),
+Size = UDim2.fromOffset(16, 16),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBold,
+TextSize = 14,
+TextColor3 = THEME.subText,
+Text = ">",
+Rotation = 90,
+}, header)
+local body = create("Frame", {
+Size = UDim2.new(1, 0, 0, 0),
+BackgroundTransparency = 1,
+ClipsDescendants = true,
+LayoutOrder = 2,
+}, card)
+local layout = create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+create("UIPadding", {
+PaddingLeft = UDim.new(0, 8),
+PaddingRight = UDim.new(0, 8),
+}, body)
+local section = {
+card = card,
+title = string.lower(title),
+pageName = State.pageNames[page],
+entries = {},
+collapsed = false,
+}
+local function expandedHeight()
+return layout.AbsoluteContentSize.Y + 10
+end
+function section.setCollapsed(collapsed)
+section.collapsed = collapsed
+tween(arrow, { Rotation = collapsed and 0 or 90 }, 0.25, Enum.EasingStyle.Back)
+tween(body, { Size = UDim2.new(1, 0, 0, collapsed and 0 or expandedHeight()) }, 0.28, Enum.EasingStyle.Quint)
+end
+State.maid:give(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+if not section.collapsed then
+body.Size = UDim2.new(1, 0, 0, expandedHeight())
+end
+end))
+State.maid:give(header.MouseButton1Click:Connect(function()
+if isScrolling() then return end
+section.setCollapsed(not section.collapsed)
+end))
+State.sections[body] = section
+return body
+end
+local function registerEntry(body, row, text)
+local section = State.sections[body]
+local entry = { row = row, section = section, text = string.lower(text) }
+table.insert(section.entries, entry)
+table.insert(State.searchEntries, entry)
+end
+local function addHover(row)
+State.maid:give(row.MouseEnter:Connect(function()
+if not IS_TOUCH then
+tween(row, { BackgroundTransparency = 0.7 })
+end
+end))
+State.maid:give(row.MouseLeave:Connect(function()
+tween(row, { BackgroundTransparency = 1 })
+end))
+State.maid:give(row.InputBegan:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.Touch then
+tween(row, { BackgroundTransparency = 0.7 }, 0.08)
+end
+end))
+State.maid:give(row.InputEnded:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.Touch then
+tween(row, { BackgroundTransparency = 1 }, 0.25)
+end
+end))
+end
+local function addToggle(body, label, key, onChange)
+local row = create("TextButton", {
+Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+BackgroundColor3 = THEME.element,
+BackgroundTransparency = 1,
+AutoButtonColor = false,
+Text = "",
+LayoutOrder = nextOrder(),
+}, body)
+create("UICorner", { CornerRadius = UDim.new(0, 6) }, row)
+addRowLabel(row, label)
+addHover(row)
+addRipple(row)
+local track = create("Frame", {
+AnchorPoint = Vector2.new(1, 0.5),
+Position = UDim2.new(1, -6, 0.5, 0),
+Size = UDim2.fromOffset(44, 24),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+}, row)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+local trackStroke = create("UIStroke", { Thickness = 2, Transparency = 1 }, track)
+bindAccent(trackStroke, "Color")
+local knob = create("Frame", {
+AnchorPoint = Vector2.new(0, 0.5),
+Position = UDim2.new(0, 3, 0.5, 0),
+Size = UDim2.fromOffset(18, 18),
+BackgroundColor3 = THEME.text,
+BorderSizePixel = 0,
+}, track)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+local function refresh()
+local enabled = State.config[key]
+tween(track, { BackgroundColor3 = enabled and THEME.accent or THEME.element }, 0.2)
+tween(trackStroke, { Transparency = enabled and 0.55 or 1 }, 0.25)
+tween(knob, { Position = enabled and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) }, 0.3, Enum.EasingStyle.Back)
+end
+State.maid:give(row.MouseButton1Down:Connect(function()
+tween(knob, { Size = UDim2.fromOffset(22, 18) }, 0.1)
+end))
+State.maid:give(row.MouseButton1Up:Connect(function()
+tween(knob, { Size = UDim2.fromOffset(18, 18) }, 0.1)
+end))
+State.maid:give(row.MouseButton1Click:Connect(function()
+if isScrolling() then return end
+State.config[key] = not State.config[key]
+refresh()
+if onChange then
+onChange(State.config[key])
+end
+end))
+table.insert(State.refreshers, refresh)
+registerEntry(body, row, label)
+refresh()
+end
+local function addSlider(body, label, key, minimum, maximum, step, options)
+options = options or {}
+local holder = create("Frame", {
+Size = UDim2.new(1, 0, 0, IS_TOUCH and 56 or 46),
+BackgroundTransparency = 1,
+LayoutOrder = nextOrder(),
+}, body)
+addRowLabel(holder, label).Size = UDim2.new(1, -80, 0, 20)
+local valueLabel = create("TextLabel", {
+AnchorPoint = Vector2.new(1, 0),
+Position = UDim2.new(1, -6, 0, 0),
+Size = UDim2.fromOffset(70, 20),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBold,
+TextSize = 12,
+TextColor3 = THEME.subText,
+TextXAlignment = Enum.TextXAlignment.Right,
+}, holder)
+local hitbox = create("Frame", {
+Position = UDim2.fromOffset(6, 22),
+Size = UDim2.new(1, -12, 0, IS_TOUCH and 30 or 22),
+BackgroundTransparency = 1,
+}, holder)
+local bar = create("Frame", {
+AnchorPoint = Vector2.new(0, 0.5),
+Position = UDim2.new(0, 0, 0.5, 0),
+Size = UDim2.new(1, 0, 0, 8),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+}, hitbox)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+local fill = create("Frame", {
+Size = UDim2.fromScale(0, 1),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BorderSizePixel = 0,
+}, bar)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+registerGradient(create("UIGradient", {}, fill))
+local knobSize = IS_TOUCH and 24 or 18
+local knob = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(0, 0.5),
+Size = UDim2.fromOffset(knobSize, knobSize),
+BackgroundColor3 = THEME.text,
+BorderSizePixel = 0,
+}, bar)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+local knobStroke = create("UIStroke", { Thickness = 2 }, knob)
+bindAccent(knobStroke, "Color")
+local function refresh()
+local value = State.config[key]
+local alpha = math.clamp((value - minimum) / (maximum - minimum), 0, 1)
+valueLabel.Text = tostring(value) .. (options.suffix or "")
+fill.Size = UDim2.fromScale(alpha, 1)
+knob.Position = UDim2.fromScale(alpha, 0.5)
+end
+local function updateFromInput(input)
+local alpha = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+local value = minimum + (maximum - minimum) * alpha
+State.config[key] = math.clamp(math.floor(value / step + 0.5) * step, minimum, maximum)
+refresh()
+if options.onChange then
+options.onChange(State.config[key])
+end
+end
+local sliding, slideInput = false, nil
+State.maid:give(hitbox.InputBegan:Connect(function(input)
+if not isPointerInput(input) then return end
+sliding = true
+slideInput = input
+State.sliderActive = true
+setScrollingEnabled(false)
+tween(knob, { Size = UDim2.fromOffset(knobSize + 6, knobSize + 6) }, 0.12, Enum.EasingStyle.Back)
+tween(knobStroke, { Thickness = 4 }, 0.12)
+updateFromInput(input)
+end))
+State.maid:give(userInputService.InputChanged:Connect(function(input)
+if not sliding then return end
+if input ~= slideInput and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+updateFromInput(input)
+end))
+State.maid:give(userInputService.InputEnded:Connect(function(input)
+if not sliding then return end
+if input ~= slideInput and not isPointerInput(input) then return end
+sliding = false
+State.sliderActive = false
+setScrollingEnabled(true)
+tween(knob, { Size = UDim2.fromOffset(knobSize, knobSize) }, 0.15)
+tween(knobStroke, { Thickness = 2 }, 0.15)
+end))
+table.insert(State.refreshers, refresh)
+registerEntry(body, holder, label)
+refresh()
+end
+local function addCycle(body, label, key, choices, onChange)
+local row = create("TextButton", {
+Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+BackgroundColor3 = THEME.element,
+BackgroundTransparency = 1,
+AutoButtonColor = false,
+Text = "",
+LayoutOrder = nextOrder(),
+}, body)
+create("UICorner", { CornerRadius = UDim.new(0, 6) }, row)
+addRowLabel(row, label)
+addHover(row)
+addRipple(row)
+local chipSize = UDim2.fromOffset(96, ROW_HEIGHT - 8)
+local chip = create("TextLabel", {
+AnchorPoint = Vector2.new(1, 0.5),
+Position = UDim2.new(1, -6, 0.5, 0),
+Size = chipSize,
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+Font = Enum.Font.GothamBold,
+TextSize = 12,
+}, row)
+bindAccent(chip, "TextColor3")
+create("UICorner", { CornerRadius = UDim.new(0, 6) }, chip)
+local function refresh()
+chip.Text = State.config[key]
+end
+State.maid:give(row.MouseButton1Click:Connect(function()
+if isScrolling() then return end
+local index = table.find(choices, State.config[key]) or 0
+State.config[key] = choices[index % #choices + 1]
+refresh()
+chip.Size = UDim2.fromOffset(108, ROW_HEIGHT - 8)
+tween(chip, { Size = chipSize }, 0.25, Enum.EasingStyle.Back)
+if onChange then
+onChange(State.config[key])
+end
+end))
+table.insert(State.refreshers, refresh)
+registerEntry(body, row, label)
+refresh()
+end
+local function addButton(body, text, callback, hoverColor)
+local button = create("TextButton", {
+Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+Font = Enum.Font.GothamMedium,
+TextSize = TEXT_SIZE,
+TextColor3 = THEME.text,
+Text = text,
+LayoutOrder = nextOrder(),
+}, body)
+create("UICorner", { CornerRadius = UDim.new(0, 6) }, button)
+addRipple(button)
+local function highlight(active)
+tween(button, { BackgroundColor3 = active and (hoverColor or THEME.accent) or THEME.element }, 0.15)
+end
+State.maid:give(button.MouseEnter:Connect(function()
+if not IS_TOUCH then
+highlight(true)
+end
+end))
+State.maid:give(button.MouseLeave:Connect(function()
+highlight(false)
+end))
+State.maid:give(button.InputBegan:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.Touch then
+highlight(true)
+end
+end))
+State.maid:give(button.InputEnded:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.Touch then
+highlight(false)
+end
+end))
+State.maid:give(button.MouseButton1Click:Connect(function()
+if isScrolling() then return end
+callback()
+end))
+registerEntry(body, button, text)
+end
+local function addInfo(body, text)
+create("TextLabel", {
+Size = UDim2.new(1, 0, 0, 0),
+AutomaticSize = Enum.AutomaticSize.Y,
+BackgroundTransparency = 1,
+Font = Enum.Font.Gotham,
+TextSize = 12,
+TextColor3 = THEME.subText,
+TextWrapped = true,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = text,
+LayoutOrder = nextOrder(),
+}, body)
+end
+local function dismissToast(wrapper)
+if State.detached then
+return
+end
+local index = table.find(State.toasts, wrapper)
+if not index then
+return
+end
+table.remove(State.toasts, index)
+local toast = wrapper:FindFirstChild("Toast")
+if toast then
+tween(toast, { Position = UDim2.fromOffset(TOAST_WIDTH + 40, 0) }, 0.22, Enum.EasingStyle.Back)
+end
+task.delay(0.25, function()
+if not State.detached then
+wrapper:Destroy()
+end
+end)
+end
+local function notify(title, message, kind)
+if State.detached or not State.notifyHolder then
+return
+end
+local color = THEME.accent
+local iconText = "i"
+if kind == "success" then
+color = THEME.success
+iconText = "OK"
+elseif kind == "error" then
+color = THEME.danger
+iconText = "!"
+end
+if #State.toasts >= TOAST_MAX then
+dismissToast(State.toasts[1])
+end
+local wrapper = create("Frame", {
+Size = UDim2.fromOffset(TOAST_WIDTH, 58),
+BackgroundTransparency = 1,
+LayoutOrder = nextOrder(),
+}, State.notifyHolder)
+local toast = create("TextButton", {
+Name = "Toast",
+Position = UDim2.fromOffset(TOAST_WIDTH + 40, 0),
+Size = UDim2.fromScale(1, 1),
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+ClipsDescendants = true,
+Text = "",
+}, wrapper)
+create("UICorner", { CornerRadius = UDim.new(0, 10) }, toast)
+create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, toast)
+local icon = create("TextLabel", {
+Position = UDim2.fromOffset(10, 16),
+Size = UDim2.fromOffset(26, 26),
+BackgroundColor3 = color,
+BorderSizePixel = 0,
+Font = Enum.Font.GothamBlack,
+TextSize = 11,
+TextColor3 = Color3.fromRGB(10, 12, 20),
+Text = iconText,
+}, toast)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, icon)
+create("TextLabel", {
+Position = UDim2.fromOffset(46, 9),
+Size = UDim2.new(1, -54, 0, 18),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBold,
+TextSize = 13,
+TextColor3 = THEME.text,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = title,
+}, toast)
+create("TextLabel", {
+Position = UDim2.fromOffset(46, 28),
+Size = UDim2.new(1, -54, 0, 18),
+BackgroundTransparency = 1,
+Font = Enum.Font.Gotham,
+TextSize = 12,
+TextColor3 = THEME.subText,
+TextXAlignment = Enum.TextXAlignment.Left,
+TextTruncate = Enum.TextTruncate.AtEnd,
+Text = message,
+}, toast)
+local progress = create("Frame", {
+Position = UDim2.new(0, 0, 1, -3),
+Size = UDim2.new(1, 0, 0, 3),
+BackgroundColor3 = color,
+BorderSizePixel = 0,
+}, toast)
+table.insert(State.toasts, wrapper)
+tween(toast, { Position = UDim2.fromOffset(0, 0) }, 0.4, Enum.EasingStyle.Back)
+tween(icon, { Rotation = 360 }, 0.5, Enum.EasingStyle.Quint)
+tweenService:Create(progress, TweenInfo.new(3.5, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 3) }):Play()
+toast.MouseButton1Click:Connect(function()
+dismissToast(wrapper)
+end)
+task.delay(3.5, function()
+dismissToast(wrapper)
+end)
+end
+local function createWatermark(screenGui)
+local frame = create("Frame", {
+Position = UDim2.fromOffset(16, -40),
+Size = UDim2.fromOffset(0, 30),
+AutomaticSize = Enum.AutomaticSize.X,
+BackgroundColor3 = THEME.background,
+BorderSizePixel = 0,
+}, screenGui)
+create("UICorner", { CornerRadius = UDim.new(0, 8) }, frame)
+local stroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, frame)
+registerGradient(create("UIGradient", {}, stroke), true)
+local logo = addLogo(frame, 22)
+logo.AnchorPoint = Vector2.new(0.5, 0.5)
+logo.Position = UDim2.fromOffset(17, 15)
+addPulse(logo, 0.06, 2.4)
+local label = create("TextLabel", {
+Size = UDim2.new(0, 0, 1, 0),
+AutomaticSize = Enum.AutomaticSize.X,
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamMedium,
+TextSize = 12,
+TextColor3 = THEME.text,
+Text = "Astra Hub",
+}, frame)
+create("UIPadding", { PaddingLeft = UDim.new(0, 34), PaddingRight = UDim.new(0, 12) }, label)
+State.watermark = { frame = frame, label = label }
+tween(frame, { Position = UDim2.fromOffset(16, 16) }, 0.6, Enum.EasingStyle.Back)
+end
+local function playIntro(screenGui, onDone)
+local overlay = create("Frame", {
+Size = UDim2.fromScale(1, 1),
+BackgroundColor3 = Color3.fromRGB(4, 5, 10),
+BackgroundTransparency = 1,
+BorderSizePixel = 0,
+Active = true,
+ZIndex = 50,
+}, screenGui)
+State.introOverlay = overlay
+for _ = 1, 18 do
+local size = math.random(2, 4)
+local star = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(math.random(), math.random()),
+Size = UDim2.fromOffset(size, size),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BackgroundTransparency = 1,
+BorderSizePixel = 0,
+ZIndex = 50,
+}, overlay)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, star)
+local info = TweenInfo.new(0.6 + math.random() * 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, math.random() * 0.8)
+tweenService:Create(star, info, { BackgroundTransparency = 0.2 }):Play()
+end
+local group = create("CanvasGroup", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(0.5, 0.5),
+Size = UDim2.fromOffset(300, 240),
+BackgroundTransparency = 1,
+GroupTransparency = 1,
+ZIndex = 51,
+}, overlay)
+local groupScale = create("UIScale", { Scale = 0.8 }, group)
+local logo = addLogo(group, 120)
+logo.AnchorPoint = Vector2.new(0.5, 0.5)
+logo.Position = UDim2.new(0.5, 0, 0, 60)
+addPulse(logo, 0.035, 3)
+local ring = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2.5 }, logo)
+registerGradient(create("UIGradient", {}, ring), true)
+local title = create("TextLabel", {
+Position = UDim2.fromOffset(0, 132),
+Size = UDim2.new(1, 0, 0, 32),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBlack,
+TextSize = 26,
+TextColor3 = Color3.new(1, 1, 1),
+Text = "ASTRA HUB",
+}, group)
+registerGradient(create("UIGradient", {}, title))
+create("TextLabel", {
+Position = UDim2.fromOffset(0, 166),
+Size = UDim2.new(1, 0, 0, 18),
+BackgroundTransparency = 1,
+Font = Enum.Font.Gotham,
+TextSize = 12,
+TextColor3 = THEME.subText,
+Text = "Murder Mystery 2  |  " .. VERSION,
+}, group)
+local barBack = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0),
+Position = UDim2.new(0.5, 0, 0, 200),
+Size = UDim2.fromOffset(180, 4),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+}, group)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, barBack)
+local barFill = create("Frame", {
+Size = UDim2.fromScale(0, 1),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BorderSizePixel = 0,
+}, barBack)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, barFill)
+registerGradient(create("UIGradient", {}, barFill))
+tween(overlay, { BackgroundTransparency = 0.2 }, 0.3)
+tween(group, { GroupTransparency = 0 }, 0.4)
+tween(groupScale, { Scale = 1 }, 0.6, Enum.EasingStyle.Back)
+tweenService:Create(barFill, TweenInfo.new(INTRO_DURATION - 0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { Size = UDim2.fromScale(1, 1) }):Play()
+task.delay(INTRO_DURATION, function()
+if State.detached then
+return
+end
+tween(group, { GroupTransparency = 1 }, 0.3)
+tween(groupScale, { Scale = 1.15 }, 0.35)
+tween(overlay, { BackgroundTransparency = 1 }, 0.35)
+task.delay(0.36, function()
+if State.detached then
+return
+end
+overlay:Destroy()
+State.introOverlay = nil
+onDone()
+end)
+end)
+end
+local function getGuiParent()
+local success, container = pcall(function()
+return gethui and gethui()
+end)
+if success and container then
+return container
+end
+return coreGui
+end
+local function installScrollFallback(pageArea, pages)
+local function isInside(position)
+local corner, size = pageArea.AbsolutePosition, pageArea.AbsoluteSize
+return position.X >= corner.X and position.X <= corner.X + size.X and position.Y >= corner.Y and position.Y <= corner.Y + size.Y
+end
+local function getMaxScroll(page)
+return math.max(0, page.AbsoluteCanvasSize.Y - page.AbsoluteWindowSize.Y)
+end
+State.maid:give(userInputService.InputChanged:Connect(function(input)
+if input.UserInputType ~= Enum.UserInputType.MouseWheel or not State.menuVisible then
+return
+end
+local page = pages[State.currentTab]
+if not page or not isInside(userInputService:GetMouseLocation()) then
+return
+end
+local before = page.CanvasPosition.Y
+local direction = input.Position.Z
+task.spawn(function()
+runService.RenderStepped:Wait()
+if State.detached or page.CanvasPosition.Y ~= before then
+return
+end
+page.CanvasPosition = Vector2.new(0, math.clamp(before - direction * WHEEL_STEP, 0, getMaxScroll(page)))
+State.lastScrollTime = os.clock()
+end)
+end))
+local tracking = nil
+State.maid:give(userInputService.InputBegan:Connect(function(input)
+if not State.menuVisible or not isPointerInput(input) then
+return
+end
+local inside = isInside(userInputService:GetMouseLocation())
+local page = pages[State.currentTab]
+if not inside or not page then
+return
+end
+tracking = {
+input = input,
+page = page,
+startY = input.Position.Y,
+canvas = page.CanvasPosition.Y,
+checkAt = nil,
+taken = false,
+}
+end))
+State.maid:give(userInputService.InputChanged:Connect(function(input)
+local track = tracking
+if not track or State.sliderActive then
+return
+end
+local sameTouch = input == track.input
+local mouseMove = track.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement
+if not (sameTouch or mouseMove) then
+return
+end
+local delta = input.Position.Y - track.startY
+if math.abs(delta) < SCROLL_THRESHOLD then
+return
+end
+if not track.checkAt then
+track.checkAt = os.clock() + 0.08
+return
+end
+if not track.taken then
+if os.clock() < track.checkAt then
+return
+end
+if track.page.CanvasPosition.Y ~= track.canvas then
+tracking = nil
+return
+end
+track.taken = true
+State.scrollTaken = true
+track.page.ScrollingEnabled = false
+end
+State.lastScrollTime = os.clock()
+track.page.CanvasPosition = Vector2.new(0, math.clamp(track.canvas - delta, 0, getMaxScroll(track.page)))
+end))
+State.maid:give(userInputService.InputEnded:Connect(function(input)
+local track = tracking
+if not track then
+return
+end
+if input ~= track.input and not isPointerInput(input) then
+return
+end
+if track.taken then
+State.scrollTaken = false
+track.page.ScrollingEnabled = true
+end
+tracking = nil
+end))
+end
+local function createMenu()
+local screenGui = State.maid:give(create("ScreenGui", {
+Name = "AstraHubMM2",
+ResetOnSpawn = false,
+IgnoreGuiInset = true,
+DisplayOrder = 100,
+ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}))
+State.guiParent = getGuiParent()
+if not pcall(function() screenGui.Parent = State.guiParent end) or not screenGui.Parent then
+State.guiParent = localPlayer:WaitForChild("PlayerGui")
+screenGui.Parent = State.guiParent
+end
+State.gui = screenGui
+State.fovRing = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+BackgroundTransparency = 1,
+BorderSizePixel = 0,
+Size = UDim2.fromOffset(800, 800),
+Visible = false,
+}, screenGui)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.fovRing)
+State.fovStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, State.fovRing)
+State.targetLine = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+BackgroundColor3 = Color3.fromRGB(0, 255, 100),
+BorderSizePixel = 0,
+Size = UDim2.fromOffset(0, 2),
+Visible = false,
+}, screenGui)
+State.targetDot = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+BackgroundColor3 = Color3.fromRGB(0, 255, 100),
+BorderSizePixel = 0,
+Size = UDim2.fromOffset(8, 8),
+Visible = false,
+}, screenGui)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.targetDot)
+State.notifyHolder = create("Frame", {
+AnchorPoint = Vector2.new(1, 1),
+Position = UDim2.new(1, -16, 1, -16),
+Size = UDim2.new(0, TOAST_WIDTH, 1, -32),
+BackgroundTransparency = 1,
+}, screenGui)
+create("UIListLayout", {
+Padding = UDim.new(0, 8),
+SortOrder = Enum.SortOrder.LayoutOrder,
+VerticalAlignment = Enum.VerticalAlignment.Bottom,
+HorizontalAlignment = Enum.HorizontalAlignment.Right,
+}, State.notifyHolder)
+local window = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(0.5, 0.5),
+Size = UDim2.fromOffset(620, 440),
+BackgroundTransparency = 1,
+Visible = false,
+}, screenGui)
+local scaler = create("Frame", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(0.5, 0.5),
+Size = UDim2.fromOffset(620, 440),
+BackgroundTransparency = 1,
+}, window)
+local windowScale = create("UIScale", { Scale = State.config.uiScale / 100 }, scaler)
+local mainFrame = create("CanvasGroup", {
+AnchorPoint = Vector2.new(0.5, 0.5),
+Position = UDim2.fromScale(0.5, 0.5),
+Size = UDim2.fromScale(1, 1),
+BackgroundColor3 = THEME.background,
+BorderSizePixel = 0,
+GroupTransparency = 1,
+}, scaler)
+create("UICorner", { CornerRadius = UDim.new(0, 14) }, mainFrame)
+local windowStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, mainFrame)
+registerGradient(create("UIGradient", {}, windowStroke), true)
+local popScale = create("UIScale", { Scale = 0.92 }, mainFrame)
+local accentLine = create("Frame", {
+Position = UDim2.fromOffset(16, 0),
+Size = UDim2.new(1, -32, 0, 2),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BorderSizePixel = 0,
+}, mainFrame)
+registerGradient(create("UIGradient", {}, accentLine))
+local HEADER_HEIGHT = 46
+local titleBar = create("Frame", {
+Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+BackgroundTransparency = 1,
+}, mainFrame)
+local headerLogo = addLogo(titleBar, 34)
+headerLogo.Position = UDim2.fromOffset(12, 6)
+local titleHolder = create("Frame", {
+Position = UDim2.fromOffset(56, 0),
+Size = UDim2.new(0, 220, 1, 0),
+BackgroundTransparency = 1,
+}, titleBar)
+create("UIListLayout", {
+FillDirection = Enum.FillDirection.Horizontal,
+VerticalAlignment = Enum.VerticalAlignment.Center,
+Padding = UDim.new(0, 8),
+SortOrder = Enum.SortOrder.LayoutOrder,
+}, titleHolder)
+local titleLabel = create("TextLabel", {
+Size = UDim2.new(0, 0, 1, 0),
+AutomaticSize = Enum.AutomaticSize.X,
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBlack,
+TextSize = 16,
+TextColor3 = Color3.new(1, 1, 1),
+Text = "ASTRA HUB",
+LayoutOrder = 1,
+}, titleHolder)
+registerGradient(create("UIGradient", {}, titleLabel))
+local subtitleChip = create("TextLabel", {
+Size = UDim2.fromOffset(0, 18),
+AutomaticSize = Enum.AutomaticSize.X,
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+Font = Enum.Font.GothamMedium,
+TextSize = 11,
+TextColor3 = THEME.subText,
+Text = "MM2",
+LayoutOrder = 2,
+}, titleHolder)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, subtitleChip)
+create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, subtitleChip)
+State.roleChip = create("TextLabel", {
+AnchorPoint = Vector2.new(1, 0.5),
+Position = UDim2.new(1, -54, 0.5, 0),
+Size = UDim2.fromOffset(0, 22),
+AutomaticSize = Enum.AutomaticSize.X,
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+Font = Enum.Font.GothamBold,
+TextSize = 11,
+TextColor3 = ROLE_COLORS.Innocent,
+Text = "Innocent",
+}, titleBar)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.roleChip)
+create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, State.roleChip)
+local closeButton = create("TextButton", {
+AnchorPoint = Vector2.new(1, 0.5),
+Position = UDim2.new(1, -12, 0.5, 0),
+Size = UDim2.fromOffset(IS_TOUCH and 32 or 26, IS_TOUCH and 32 or 26),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+Font = Enum.Font.GothamBold,
+TextSize = 12,
+TextColor3 = THEME.text,
+Text = "X",
+}, titleBar)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, closeButton)
+addRipple(closeButton)
+State.maid:give(closeButton.MouseEnter:Connect(function()
+tween(closeButton, { BackgroundColor3 = THEME.danger })
+end))
+State.maid:give(closeButton.MouseLeave:Connect(function()
+tween(closeButton, { BackgroundColor3 = THEME.element })
+end))
+create("Frame", {
+Position = UDim2.fromOffset(0, HEADER_HEIGHT),
+Size = UDim2.new(1, 0, 0, 1),
+BackgroundColor3 = THEME.stroke,
+BorderSizePixel = 0,
+}, mainFrame)
+local divider = create("Frame", {
+Position = UDim2.fromOffset(132, HEADER_HEIGHT + 1),
+Size = UDim2.new(0, 1, 1, -(HEADER_HEIGHT + 1)),
+BackgroundColor3 = THEME.stroke,
+BorderSizePixel = 0,
+}, mainFrame)
+local TAB_HEIGHT = IS_TOUCH and 40 or 34
+local TAB_GAP = 4
+local TAB_PAD = 10
+local sidebar = create("Frame", {
+Position = UDim2.fromOffset(0, HEADER_HEIGHT + 1),
+Size = UDim2.new(0, 132, 1, -(HEADER_HEIGHT + 1)),
+BackgroundTransparency = 1,
+}, mainFrame)
+local pill = create("Frame", {
+Position = UDim2.fromOffset(8, TAB_PAD),
+Size = UDim2.new(1, -16, 0, TAB_HEIGHT),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+ZIndex = 1,
+}, sidebar)
+create("UICorner", { CornerRadius = UDim.new(0, 8) }, pill)
+local pillBar = create("Frame", {
+AnchorPoint = Vector2.new(0, 0.5),
+Position = UDim2.new(0, 0, 0.5, 0),
+Size = UDim2.fromOffset(3, 18),
+BackgroundColor3 = Color3.new(1, 1, 1),
+BorderSizePixel = 0,
+}, pill)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, pillBar)
+registerGradient(create("UIGradient", { Rotation = 90 }, pillBar))
+local tabList = create("Frame", {
+Size = UDim2.fromScale(1, 1),
+BackgroundTransparency = 1,
+ZIndex = 2,
+}, sidebar)
+create("UIListLayout", { Padding = UDim.new(0, TAB_GAP), SortOrder = Enum.SortOrder.LayoutOrder }, tabList)
+create("UIPadding", {
+PaddingTop = UDim.new(0, TAB_PAD),
+PaddingLeft = UDim.new(0, 8),
+PaddingRight = UDim.new(0, 8),
+}, tabList)
+local profile = create("Frame", {
+AnchorPoint = Vector2.new(0, 1),
+Position = UDim2.new(0, 8, 1, -8),
+Size = UDim2.new(1, -16, 0, 46),
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+ZIndex = 2,
+}, sidebar)
+create("UICorner", { CornerRadius = UDim.new(0, 10) }, profile)
+create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, profile)
+local avatar = create("ImageLabel", {
+Position = UDim2.fromOffset(8, 8),
+Size = UDim2.fromOffset(30, 30),
+BackgroundColor3 = THEME.element,
+BorderSizePixel = 0,
+Image = "rbxthumb://type=AvatarHeadShot&id=" .. localPlayer.UserId .. "&w=48&h=48",
+}, profile)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, avatar)
+local profileTexts = create("Frame", {
+Position = UDim2.fromOffset(44, 0),
+Size = UDim2.new(1, -48, 1, 0),
+BackgroundTransparency = 1,
+}, profile)
+create("TextLabel", {
+Position = UDim2.fromOffset(0, 8),
+Size = UDim2.new(1, 0, 0, 16),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamMedium,
+TextSize = 12,
+TextColor3 = THEME.text,
+TextXAlignment = Enum.TextXAlignment.Left,
+TextTruncate = Enum.TextTruncate.AtEnd,
+Text = localPlayer.DisplayName,
+}, profileTexts)
+State.profileRole = create("TextLabel", {
+Position = UDim2.fromOffset(0, 24),
+Size = UDim2.new(1, 0, 0, 14),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBold,
+TextSize = 11,
+TextColor3 = ROLE_COLORS.Innocent,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = "Innocent",
+}, profileTexts)
+local SEARCH_HEIGHT = IS_TOUCH and 50 or 42
+local content = create("Frame", {
+Position = UDim2.fromOffset(133, HEADER_HEIGHT + 1),
+Size = UDim2.new(1, -133, 1, -(HEADER_HEIGHT + 1)),
+BackgroundTransparency = 1,
+}, mainFrame)
+local searchBox = create("TextBox", {
+Position = UDim2.fromOffset(10, 7),
+Size = UDim2.new(1, -24, 0, SEARCH_HEIGHT - 14),
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+ClearTextOnFocus = false,
+Font = Enum.Font.Gotham,
+TextSize = TEXT_SIZE,
+TextColor3 = THEME.text,
+TextXAlignment = Enum.TextXAlignment.Left,
+PlaceholderText = "Search features...",
+PlaceholderColor3 = THEME.subText,
+Text = "",
+}, content)
+create("UICorner", { CornerRadius = UDim.new(0, 8) }, searchBox)
+create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, searchBox)
+create("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, searchBox)
+local pageArea = create("Frame", {
+Position = UDim2.fromOffset(0, SEARCH_HEIGHT),
+Size = UDim2.new(1, 0, 1, -SEARCH_HEIGHT),
+BackgroundTransparency = 1,
+ClipsDescendants = true,
+}, content)
+local emptyLabel = create("TextLabel", {
+Size = UDim2.new(1, 0, 0, 60),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamMedium,
+TextSize = TEXT_SIZE,
+TextColor3 = THEME.subText,
+Text = "No matching features.",
+Visible = false,
+}, pageArea)
+local pages, tabButtons, tabOrder = {}, {}, {}
+State.pageFrames = pages
+local function selectTab(name)
+State.currentTab = name
+for tabName, page in pairs(pages) do
+local active = tabName == name
+if active and not page.Visible then
+page.Visible = true
+page.Position = UDim2.fromOffset(18, 0)
+tween(page, { Position = UDim2.fromOffset(0, 0) }, 0.28, Enum.EasingStyle.Quint)
+elseif not active then
+page.Visible = false
+end
+tween(tabButtons[tabName], { TextColor3 = active and THEME.text or THEME.subText })
+end
+local index = table.find(tabOrder, name) or 1
+tween(pill, { Position = UDim2.fromOffset(8, TAB_PAD + (index - 1) * (TAB_HEIGHT + TAB_GAP)) }, 0.28, Enum.EasingStyle.Quint)
+end
+local function addTab(name)
+local button = create("TextButton", {
+Size = UDim2.new(1, 0, 0, TAB_HEIGHT),
+BackgroundTransparency = 1,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+Font = Enum.Font.GothamMedium,
+TextSize = TEXT_SIZE,
+TextColor3 = THEME.subText,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = name,
+LayoutOrder = nextOrder(),
+}, tabList)
+create("UIPadding", { PaddingLeft = UDim.new(0, 16) }, button)
+local page = create("ScrollingFrame", {
+Size = UDim2.fromScale(1, 1),
+BackgroundTransparency = 1,
+BorderSizePixel = 0,
+Active = true,
+ScrollBarThickness = IS_TOUCH and 5 or 4,
+ScrollBarImageTransparency = 0.2,
+ScrollingDirection = Enum.ScrollingDirection.Y,
+CanvasSize = UDim2.new(),
+AutomaticCanvasSize = Enum.AutomaticSize.None,
+Visible = false,
+}, pageArea)
+bindAccent(page, "ScrollBarImageColor3")
+local layout = create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+create("UIPadding", {
+PaddingTop = UDim.new(0, 4),
+PaddingBottom = UDim.new(0, 12),
+PaddingLeft = UDim.new(0, 10),
+PaddingRight = UDim.new(0, 14),
+}, page)
+State.maid:give(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 16)
+end))
+pages[name] = page
+tabButtons[name] = button
+State.pageNames[page] = name
+table.insert(tabOrder, name)
+State.maid:give(button.MouseButton1Click:Connect(function()
+selectTab(name)
+end))
+return page
+end
+local function applySearch(query)
+query = string.lower(query)
+local total, pageMatches = 0, {}
+for _, section in pairs(State.sections) do
+local titleMatch = query ~= "" and string.find(section.title, query, 1, true) ~= nil
+local anyVisible = false
+for _, entry in ipairs(section.entries) do
+local visible = query == "" or titleMatch or string.find(entry.text, query, 1, true) ~= nil
+entry.row.Visible = visible
+if visible then
+anyVisible = true
+total += 1
+pageMatches[section.pageName] = (pageMatches[section.pageName] or 0) + 1
+end
+end
+section.card.Visible = query == "" or anyVisible
+if query ~= "" and anyVisible and section.collapsed then
+section.setCollapsed(false)
+end
+end
+emptyLabel.Visible = query ~= "" and total == 0
+for name, button in pairs(tabButtons) do
+tween(button, { TextTransparency = (query ~= "" and not pageMatches[name]) and 0.6 or 0 })
+end
+if query ~= "" and total > 0 and not pageMatches[State.currentTab] then
+for _, name in ipairs(tabOrder) do
+if pageMatches[name] then
+selectTab(name)
+break
+end
+end
+end
+end
+State.maid:give(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+applySearch(searchBox.Text)
+end))
+local combatPage = addTab("Combat")
+local aimBody = addSection(combatPage, "Aimbot")
+addToggle(aimBody, "Enabled", "aimbotEnabled")
+addToggle(aimBody, "Show FOV Ring", "fovVisible")
+addSlider(aimBody, "FOV Radius", "fovRadius", 50, 900, 10)
+addSlider(aimBody, "Max Distance", "aimMaxDistance", 100, 2000, 50)
+addCycle(aimBody, "Hit Part", "hitPart", HIT_PARTS)
+addSlider(aimBody, "Hit Chance", "hitChance", 1, 100, 1, { suffix = "%" })
+addCycle(aimBody, "Toggle Key (PC)", "aimKeybind", AIM_KEY_NAMES)
+addToggle(aimBody, "Show AIM Button", "showAimButton", function(enabled)
+if State.aimButton then
+State.aimButton.Visible = enabled
+end
+end)
+addInfo(aimBody, "Only fires while you are actually holding the sheriff gun. The switch, the toggle key and the AIM button all flip the same on/off state - one tap, no holding.")
+local logicBody = addSection(combatPage, "Target Logic")
+addCycle(logicBody, "Priority", "priority", PRIORITY_MODES)
+addToggle(logicBody, "Sticky Target", "stickyTarget")
+addToggle(logicBody, "Murderer Only", "murdererOnly")
+addToggle(logicBody, "Wall Check", "wallCheck")
+addToggle(logicBody, "Target Line", "targetLine")
+addInfo(logicBody, "Murderer Only keeps the sheriff gun off innocents. A murderer or sheriff only shows once they draw their weapon, same as the game shows any player.")
+task.wait()
+local espPage = addTab("ESP")
+local espBody = addSection(espPage, "Player ESP")
+addToggle(espBody, "Enabled", "espEnabled")
+addToggle(espBody, "Boxes", "espBoxes")
+addToggle(espBody, "Names", "espNames")
+addToggle(espBody, "Roles", "espRoles")
+addToggle(espBody, "Health Bar", "espHealth")
+addToggle(espBody, "Distance", "espDistance")
+addToggle(espBody, "Tracers", "espTracers")
+addToggle(espBody, "Chams", "espChams")
+addSlider(espBody, "Max Distance", "espMaxDistance", 100, 3000, 50)
+addInfo(espBody, "Red: Murderer. Blue: Sheriff. Green: Innocent (or not yet revealed).")
+task.wait()
+local bombPage = addTab("Bomb Jump")
+local bombBody = addSection(bombPage, "Bomb Jump")
+addToggle(bombBody, "Auto-Throw On Tap", "bombJumpEnabled")
+addSlider(bombBody, "Cooldown", "bombCooldown", 1, 60, 1, { suffix = "s" })
+addToggle(bombBody, "Show BOMB Button", "showBombButton", function(enabled)
+if State.bombQuickButton then
+State.bombQuickButton.Visible = enabled
+end
+end)
+addButton(bombBody, "Throw Now", function()
+task.spawn(function()
+if not (State.bombController and State.bombController.throw()) then
+notify("Bomb Jump", "No FakeBomb found and could not fetch one.", "error")
+end
+end)
+end)
+addInfo(bombBody, "Uses the exact tool named \"FakeBomb\". If you are not holding one, it asks the server for it first. Auto-Throw On Tap fires it whenever you tap the screen while holding it; the BOMB button always fires it once, on cooldown, no holding needed.")
+local goldBombBody = addSection(bombPage, "Gold Bomb Jump")
+addToggle(goldBombBody, "Auto-Throw On Tap", "goldBombJumpEnabled")
+addSlider(goldBombBody, "Cooldown", "goldBombCooldown", 1, 30, 1, { suffix = "s" })
+addToggle(goldBombBody, "Show GOLD Button", "showGoldButton", function(enabled)
+if State.goldQuickButton then
+State.goldQuickButton.Visible = enabled
+end
+end)
+addButton(goldBombBody, "Throw Now", function()
+task.spawn(function()
+if not (State.goldBombController and State.goldBombController.throw()) then
+notify("Gold Bomb Jump", "No GoldBomb found and could not fetch one.", "error")
+end
+end)
+end)
+addInfo(goldBombBody, "Same idea, using the exact tool named \"GoldBomb\". Runs independently from the regular one above, so you can enable either or both.")
+task.wait()
+local settingsPage = addTab("Settings")
+local interfaceBody = addSection(settingsPage, "Interface")
+addCycle(interfaceBody, "Theme", "theme", THEME_NAMES, applyTheme)
+addToggle(interfaceBody, "Watermark", "watermark")
+addToggle(interfaceBody, "Intro Animation", "intro")
+addToggle(interfaceBody, "Launcher Button", "launcher", function()
+State.syncInterface()
+end)
+addSlider(interfaceBody, "Menu Scale", "uiScale", 60, 120, 5, {
+suffix = "%",
+onChange = function()
+State.syncInterface()
+end,
+})
+local configBody = addSection(settingsPage, "Config")
+addToggle(configBody, "Auto Load On Start", "autoLoad")
+addButton(configBody, "Save Config", function()
+if saveConfig() then
+notify("Config", "Saved to " .. CONFIG_PATH, "success")
+else
+notify("Config", "Could not save the config.", "error")
+end
+end)
+addButton(configBody, "Load Config", function()
+if loadConfig() then
+notify("Config", "Loaded your saved config.", "success")
+else
+notify("Config", "No saved config found.", "error")
+end
+end)
+addButton(configBody, "Copy Config", function()
+if pcall(setclipboard, httpService:JSONEncode(State.config)) then
+notify("Config", "Copied to your clipboard.", "success")
+else
+notify("Config", "Clipboard is not available.", "error")
+end
+end)
+addButton(configBody, "Reset To Defaults", function()
+resetConfig()
+notify("Config", "Everything was reset.", "info")
+end, THEME.danger)
+local scriptBody = addSection(settingsPage, "Script")
+addInfo(scriptBody, IS_TOUCH and "Tap the logo button to show or hide the menu. Drag the title bar to move it." or "Press RightShift or Insert to show or hide the menu. Drag the title bar to move it.")
+addButton(scriptBody, "Unload", function()
+AstraHub.detach()
+end, THEME.danger)
+local aboutBody = addSection(settingsPage, "About")
+local aboutRow = create("Frame", {
+Size = UDim2.new(1, 0, 0, 84),
+BackgroundTransparency = 1,
+LayoutOrder = nextOrder(),
+}, aboutBody)
+local aboutLogo = addLogo(aboutRow, 72)
+aboutLogo.Position = UDim2.fromOffset(6, 6)
+local aboutTitle = create("TextLabel", {
+Position = UDim2.fromOffset(90, 10),
+Size = UDim2.new(1, -96, 0, 24),
+BackgroundTransparency = 1,
+Font = Enum.Font.GothamBlack,
+TextSize = 18,
+TextColor3 = Color3.new(1, 1, 1),
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = "Astra Hub",
+}, aboutRow)
+registerGradient(create("UIGradient", {}, aboutTitle))
+create("TextLabel", {
+Position = UDim2.fromOffset(90, 38),
+Size = UDim2.new(1, -96, 0, 16),
+BackgroundTransparency = 1,
+Font = Enum.Font.Gotham,
+TextSize = 12,
+TextColor3 = THEME.subText,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = VERSION .. "  |  Murder Mystery 2",
+}, aboutRow)
+create("TextLabel", {
+Position = UDim2.fromOffset(90, 56),
+Size = UDim2.new(1, -96, 0, 16),
+BackgroundTransparency = 1,
+Font = Enum.Font.Gotham,
+TextSize = 12,
+TextColor3 = THEME.subText,
+TextXAlignment = Enum.TextXAlignment.Left,
+Text = "ESP, aimbot and bomb jump.",
+}, aboutRow)
+task.wait()
+selectTab("Combat")
+makeDraggable(titleBar, window)
+installScrollFallback(pageArea, pages)
+createWatermark(screenGui)
+local function setMenuVisible(visible)
+State.menuVisible = visible
+State.menuToken += 1
+local token = State.menuToken
+if visible then
+window.Visible = true
+tween(mainFrame, { GroupTransparency = 0 }, 0.22)
+tween(popScale, { Scale = 1 }, 0.3, Enum.EasingStyle.Back)
+return
+end
+tween(mainFrame, { GroupTransparency = 1 }, 0.18)
+tween(popScale, { Scale = 0.92 }, 0.18)
+task.delay(0.2, function()
+if State.detached or State.menuToken ~= token then
+return
+end
+window.Visible = false
+end)
+end
+local launcherSize = IS_TOUCH and 52 or 44
+local launcher = create("TextButton", {
+Position = UDim2.new(0, 14, 0.4, 0),
+Size = UDim2.fromOffset(launcherSize, launcherSize),
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+Text = "",
+Visible = State.config.launcher,
+}, screenGui)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, launcher)
+local launcherLogo = addLogo(launcher, launcherSize - 8)
+launcherLogo.Position = UDim2.fromOffset(4, 4)
+local launcherStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2 }, launcher)
+registerGradient(create("UIGradient", {}, launcherStroke), true)
+makeDraggable(launcher, launcher, function()
+setMenuVisible(not State.menuVisible)
+end)
+local function addQuickButton(text, position, visible, onTap)
+local size = IS_TOUCH and 50 or 42
+local button = create("TextButton", {
+Position = position,
+Size = UDim2.fromOffset(size, size),
+BackgroundColor3 = THEME.card,
+BorderSizePixel = 0,
+AutoButtonColor = false,
+Font = Enum.Font.GothamBlack,
+TextSize = 11,
+TextColor3 = THEME.text,
+Text = text,
+Visible = visible,
+}, screenGui)
+create("UICorner", { CornerRadius = UDim.new(1, 0) }, button)
+local stroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2 }, button)
+registerGradient(create("UIGradient", {}, stroke), true)
+makeDraggable(button, button, onTap)
+return button
+end
+State.aimButton = addQuickButton("AIM", UDim2.new(0, 14, 0.4, launcherSize + 12), State.config.showAimButton, function()
+State.config.aimbotEnabled = not State.config.aimbotEnabled
+refreshAll()
+end)
+local function flashQuickButton(button, ok)
+tween(button, { BackgroundColor3 = ok and THEME.success or THEME.danger }, 0.12)
+task.delay(0.35, function()
+if not State.detached then
+tween(button, { BackgroundColor3 = THEME.card }, 0.25)
+end
+end)
+end
+State.bombQuickButton = addQuickButton("BOMB", UDim2.new(0, 14, 0.4, launcherSize + 12 + 62), State.config.showBombButton, function()
+task.spawn(function()
+local ok = State.bombController and State.bombController.throw()
+flashQuickButton(State.bombQuickButton, ok)
+if not ok then
+notify("Bomb Jump", "No FakeBomb found and could not fetch one.", "error")
+end
+end)
+end)
+State.goldQuickButton = addQuickButton("GOLD", UDim2.new(0, 14, 0.4, launcherSize + 12 + 124), State.config.showGoldButton, function()
+task.spawn(function()
+local ok = State.goldBombController and State.goldBombController.throw()
+flashQuickButton(State.goldQuickButton, ok)
+if not ok then
+notify("Gold Bomb Jump", "No GoldBomb found and could not fetch one.", "error")
+end
+end)
+end)
+if State.bombController then
+State.bombController.button = State.bombQuickButton
+end
+if State.goldBombController then
+State.goldBombController.button = State.goldQuickButton
+end
+local function refreshAimButton()
+local enabled = State.config.aimbotEnabled
+tween(State.aimButton, { BackgroundColor3 = enabled and THEME.success or THEME.card }, 0.2)
+end
+table.insert(State.refreshers, refreshAimButton)
+refreshAimButton()
+local function applyResponsive()
+local camera = workspace.CurrentCamera
+if not camera then
+return
+end
+local viewport = camera.ViewportSize
+local scale = State.config.uiScale / 100
+local width = math.clamp(viewport.X * 0.85 / scale, 320, 620)
+local height = math.clamp(viewport.Y * 0.85 / scale, 260, 440)
+local compact = width < 520
+local sidebarWidth = compact and 92 or 132
+scaler.Size = UDim2.fromOffset(width, height)
+window.Size = UDim2.fromOffset(width * scale, height * scale)
+sidebar.Size = UDim2.new(0, sidebarWidth, 1, -(HEADER_HEIGHT + 1))
+divider.Position = UDim2.fromOffset(sidebarWidth, HEADER_HEIGHT + 1)
+content.Position = UDim2.fromOffset(sidebarWidth + 1, HEADER_HEIGHT + 1)
+content.Size = UDim2.new(1, -(sidebarWidth + 1), 1, -(HEADER_HEIGHT + 1))
+subtitleChip.Visible = not compact
+State.roleChip.Visible = not compact
+profileTexts.Visible = not compact
+end
+State.syncInterface = function()
+windowScale.Scale = State.config.uiScale / 100
+launcher.Visible = State.config.launcher
+applyResponsive()
+end
+local camera = workspace.CurrentCamera
+if camera then
+State.maid:give(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
+end
+State.maid:give(closeButton.MouseButton1Click:Connect(function()
+setMenuVisible(false)
+notify("Menu hidden", IS_TOUCH and "Tap the logo button to reopen." or "Press RightShift or Insert to reopen.", "info")
+end))
+State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+if gameProcessed or not MENU_TOGGLE_KEYS[input.KeyCode] then
+return
+end
+setMenuVisible(not State.menuVisible)
+end))
+applyResponsive()
+local autoLoaded = loadConfig(true)
+local function openMenu()
+setMenuVisible(true)
+notify("Astra Hub", "Loaded successfully.", "success")
+if autoLoaded then
+notify("Config", "Auto-loaded your saved config.", "info")
+end
+end
+local introStarted = State.config.intro and pcall(playIntro, screenGui, openMenu)
+if not introStarted then
+if State.introOverlay then
+State.introOverlay:Destroy()
+State.introOverlay = nil
+end
+openMenu()
+end
+end
+local function runStage(name, callback)
+local success, result = xpcall(callback, function(message)
+return tostring(message) .. "\n" .. debug.traceback()
+end)
+if success then
+return
+end
+table.insert(State.errors, name .. ": " .. tostring(result))
+warn("Astra Hub stage failed: " .. name)
+warn(result)
+end
+local function showErrors()
+if #State.errors == 0 then
+return
+end
+pcall(function()
+local gui = Instance.new("ScreenGui")
+gui.Name = "AstraHubMM2Errors"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 1000
+gui.Parent = State.guiParent or getGuiParent()
+local box = Instance.new("TextButton")
+box.AnchorPoint = Vector2.new(0.5, 0)
+box.Position = UDim2.new(0.5, 0, 0, 20)
+box.Size = UDim2.new(0.92, 0, 0, 0)
+box.AutomaticSize = Enum.AutomaticSize.Y
+box.BackgroundColor3 = Color3.fromRGB(40, 12, 16)
+box.BorderSizePixel = 0
+box.Font = Enum.Font.Code
+box.TextSize = 12
+box.TextColor3 = Color3.fromRGB(255, 170, 170)
+box.TextWrapped = true
+box.TextXAlignment = Enum.TextXAlignment.Left
+box.TextYAlignment = Enum.TextYAlignment.Top
+box.Text = string.sub("Astra Hub had problems loading (tap to close):\n\n" .. table.concat(State.errors, "\n\n"), 1, 1200)
+box.Parent = gui
+box.MouseButton1Click:Connect(function()
+gui:Destroy()
+end)
+end)
+end
+function AstraHub.init()
+task.wait()
+if not game:IsLoaded() then
+game.Loaded:Wait()
+end
+State.noDrawing = not pcall(function()
+Drawing.new("Line"):Remove()
+end)
+State.logoAsset = loadLogo()
+task.wait()
+runStage("bomb controllers", function()
+State.bombController = createBombController(NORMAL_BOMB_NAME, "bombCooldown")
+State.goldBombController = createBombController(GOLD_BOMB_NAME, "goldBombCooldown")
+end)
+runStage("menu", createMenu)
+task.wait()
+runStage("players", function()
+for _, player in ipairs(playersService:GetPlayers()) do
+addEsp(player)
+end
+State.maid:give(playersService.PlayerAdded:Connect(addEsp))
+State.maid:give(playersService.PlayerRemoving:Connect(removePlayer))
+end)
+runStage("loops", function()
+State.maid:give(runService.RenderStepped:Connect(onRender))
+end)
+task.wait()
+runStage("aimbot", installAimbot)
+runStage("aim keybind", installAimKeybind)
+runStage("bomb taps", installBombTapListener)
+showErrors()
+if State.noDrawing then
+notify("Compatibility", "No Drawing library. ESP uses chams and name tags.", "info")
+end
+end
+function AstraHub.detach()
+State.detached = true
+State.target = nil
+State.maid:clean()
+for _, esp in pairs(State.esp) do
+esp:destroy()
+end
+State.esp = {}
+State.fovRing = nil
+State.targetLine = nil
+State.targetDot = nil
+end
+local function onInitializeError(error)
+table.insert(State.errors, "init: " .. tostring(error))
+warn("Failed to initialize.")
+warn(error)
+warn(debug.traceback())
+showErrors()
+AstraHub.detach()
+end
+if shared.AstraHubMM2 then
+shared.AstraHubMM2.detach()
+end
+shared.AstraHubMM2 = AstraHub
+xpcall(AstraHub.init, onInitializeError)
