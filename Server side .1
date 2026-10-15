@@ -1,0 +1,1792 @@
+--========================================================================
+--  ZOMBIE ASSAULT  -  SERVER SCRIPT
+--  WHERE:  ServerScriptService  ->  Script   (rename it "ZombieServer")
+--  Builds the map, zombies (R6 rigs), waves, weapons, shop and saving.
+--  NOT TESTED IN STUDIO BY ME - see the notes in the chat.
+--========================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local PathfindingService = game:GetService("PathfindingService")
+local CollectionService = game:GetService("CollectionService")
+local Debris = game:GetService("Debris")
+local TweenService = game:GetService("TweenService")
+local DataStoreService = game:GetService("DataStoreService")
+local PhysicsService = game:GetService("PhysicsService")
+
+--========================== SETTINGS ====================================
+local CFG = {
+	ARENA = 300,            -- map is 300 x 300 studs
+	MAX_ALIVE = 22,         -- max zombies alive at once (lower = faster on phones)
+	AI_TICK = 0.2,          -- zombie brain update rate (seconds)
+	PATH_REFRESH = 1.5,     -- how often a zombie may recalculate its path
+	MAX_PATHS_AT_ONCE = 3,  -- path calculations running at the same time
+	START_COUNTDOWN = 10,   -- seconds before wave 1
+	BREAK_TIME = 15,        -- seconds between waves
+	BOSS_EVERY = 5,         -- boss wave every N waves
+	START_COINS = 150,
+	MEDKIT_PRICE = 150,
+	MEDKIT_HEAL = 60,
+	MEDKIT_MAX = 5,
+	LIGHTS = true,          -- set false if the game lags on phones
+	SAVE_DATA = true,       -- needs "Enable Studio Access to API Services"
+}
+
+Players.CharacterAutoLoads = false -- we spawn players ourselves (Play button)
+
+--========================== REMOTES =====================================
+do
+	local old = ReplicatedStorage:FindFirstChild("ZA_Remotes")
+	if old then old:Destroy() end
+end
+local RemotesFolder = Instance.new("Folder")
+RemotesFolder.Name = "ZA_Remotes"
+RemotesFolder.Parent = ReplicatedStorage
+
+local function newRemote(class, name)
+	local r = Instance.new(class)
+	r.Name = name
+	r.Parent = RemotesFolder
+	return r
+end
+
+local R = {
+	Play = newRemote("RemoteEvent", "Play"),
+	Respawn = newRemote("RemoteEvent", "Respawn"),
+	LeaveGame = newRemote("RemoteEvent", "LeaveGame"),
+	Fire = newRemote("RemoteEvent", "Fire"),
+	Reload = newRemote("RemoteEvent", "Reload"),
+	UseMedkit = newRemote("RemoteEvent", "UseMedkit"),
+	Unstuck = newRemote("RemoteEvent", "Unstuck"),
+	Notify = newRemote("RemoteEvent", "Notify"),
+	Announce = newRemote("RemoteEvent", "Announce"),
+	Shot = newRemote("RemoteEvent", "Shot"),
+	HitMarker = newRemote("RemoteEvent", "HitMarker"),
+	GameOver = newRemote("RemoteEvent", "GameOver"),
+	Buy = newRemote("RemoteFunction", "Buy"),
+	GetShop = newRemote("RemoteFunction", "GetShop"),
+}
+
+--========================== GAME DATA ===================================
+local WEAPON_ORDER = { "Pistol", "SMG", "Shotgun", "Rifle", "Sniper" }
+local WEAPONS = {
+	Pistol  = { Price = 0,    Damage = 24,  FireRate = 0.30,  Mag = 12, Reserve = 96,  Reload = 1.3, Range = 160, Pellets = 1, Spread = 0.6, Auto = false, Len = 1.2, Color = Color3.fromRGB(55, 55, 62),  Accent = Color3.fromRGB(190, 40, 40),  Desc = "Reliable sidearm. Never leaves your side." },
+	SMG     = { Price = 450,  Damage = 14,  FireRate = 0.085, Mag = 30, Reserve = 210, Reload = 1.6, Range = 150, Pellets = 1, Spread = 2.2, Auto = true,  Len = 1.7, Color = Color3.fromRGB(45, 45, 50),  Accent = Color3.fromRGB(230, 160, 40), Desc = "Rapid fire. Great against runners." },
+	Shotgun = { Price = 900,  Damage = 13,  FireRate = 0.85,  Mag = 6,  Reserve = 48,  Reload = 2.3, Range = 70,  Pellets = 8, Spread = 7,   Auto = false, Len = 2.3, Color = Color3.fromRGB(60, 60, 66),  Accent = Color3.fromRGB(120, 80, 45),  Desc = "8 pellets per shot. Devastating up close." },
+	Rifle   = { Price = 1600, Damage = 32,  FireRate = 0.11,  Mag = 30, Reserve = 240, Reload = 1.9, Range = 220, Pellets = 1, Spread = 1.2, Auto = true,  Len = 2.6, Color = Color3.fromRGB(40, 55, 40),  Accent = Color3.fromRGB(90, 120, 80),  Desc = "Accurate and powerful. The all-rounder." },
+	Sniper  = { Price = 2800, Damage = 150, FireRate = 1.10,  Mag = 5,  Reserve = 45,  Reload = 2.6, Range = 450, Pellets = 1, Spread = 0,   Auto = false, Len = 3.3, Color = Color3.fromRGB(35, 35, 45),  Accent = Color3.fromRGB(70, 130, 220), Desc = "One shot, huge damage. Headshots hurt." },
+}
+local MAX_LEVEL = 5
+local UPGRADE_KEYS = { "Damage", "Mag", "Reload" }
+local UPGRADE_LABEL = { Damage = "Damage +15%", Mag = "Magazine +25%", Reload = "Reload -10%" }
+
+local ITEM_ORDER = { "Medkit", "AmmoRefill", "DamageBoost", "SpeedBoost" }
+local ITEMS = {
+	Medkit = { Name = "Medkit", Price = CFG.MEDKIT_PRICE, Desc = "Heals " .. CFG.MEDKIT_HEAL .. " HP. Use with H or the MEDKIT button. Carry up to " .. CFG.MEDKIT_MAX .. "." },
+	AmmoRefill = { Name = "Ammo Refill", Price = 200, Desc = "Refills reserve ammo for all your weapons." },
+	DamageBoost = { Name = "Damage Boost", Price = 300, Desc = "+50% damage for 60 seconds.", Duration = 60 },
+	SpeedBoost = { Name = "Speed Boost", Price = 250, Desc = "Run faster for 60 seconds.", Duration = 60 },
+}
+
+local ZOMBIES = {
+	Normal = { Health = 100,  Speed = 11, Damage = 10, Range = 5,   Cooldown = 1.1, Reward = 10, Scale = 1.0,  Skin = Color3.fromRGB(105, 145, 90),  Shirt = Color3.fromRGB(80, 62, 50),  Pants = Color3.fromRGB(40, 45, 62),  Eyes = Color3.fromRGB(255, 60, 40) },
+	Runner = { Health = 55,   Speed = 19, Damage = 7,  Range = 4.6, Cooldown = 0.8, Reward = 14, Scale = 0.9,  Skin = Color3.fromRGB(150, 175, 120), Shirt = Color3.fromRGB(125, 40, 40), Pants = Color3.fromRGB(60, 50, 40),  Eyes = Color3.fromRGB(255, 200, 40) },
+	Tank   = { Health = 450,  Speed = 7,  Damage = 26, Range = 6.5, Cooldown = 1.6, Reward = 40, Scale = 1.45, Skin = Color3.fromRGB(75, 100, 70),   Shirt = Color3.fromRGB(40, 40, 46),  Pants = Color3.fromRGB(30, 30, 34),  Eyes = Color3.fromRGB(255, 40, 40) },
+	Mutant = { Health = 850,  Speed = 14, Damage = 22, Range = 6,   Cooldown = 1.0, Reward = 75, Scale = 1.25, Skin = Color3.fromRGB(125, 60, 150),  Shirt = Color3.fromRGB(60, 20, 70),  Pants = Color3.fromRGB(35, 20, 45),  Eyes = Color3.fromRGB(120, 255, 120), Charge = true },
+	Boss   = { Health = 4000, Speed = 10, Damage = 38, Range = 9,   Cooldown = 1.5, Reward = 500, Scale = 2.4, Skin = Color3.fromRGB(150, 40, 40),   Shirt = Color3.fromRGB(35, 12, 12),  Pants = Color3.fromRGB(25, 10, 10),  Eyes = Color3.fromRGB(255, 255, 255), Boss = true },
+}
+
+--========================== STATE =======================================
+local Data = {}            -- [player] = their save/session data
+local Alive = {}           -- list of living zombie state tables
+local Queue = {}           -- zombie types still waiting to spawn this wave
+local Wave = 0
+local restartRequested = false
+local pathBusy = 0
+local lastFire = setmetatable({}, { __mode = "k" })
+
+local MapFolder = Instance.new("Folder")
+MapFolder.Name = "ZA_Map"
+MapFolder.Parent = Workspace
+local ZombieFolder = Instance.new("Folder")
+ZombieFolder.Name = "ZA_Zombies"
+ZombieFolder.Parent = Workspace
+
+local SpawnPads = {}       -- player spawn parts
+local ZombieSpawns = {}    -- Vector3 centres of zombie spawn zones
+
+-- Zombies don't collide with each other (stops them blocking each other)
+local ZG_OK = pcall(function()
+	PhysicsService:RegisterCollisionGroup("ZA_Zombies")
+	PhysicsService:CollisionGroupSetCollidable("ZA_Zombies", "ZA_Zombies", false)
+end)
+
+--========================== SMALL HELPERS ===============================
+local function notify(player, text, kind)
+	if player and player.Parent then
+		R.Notify:FireClient(player, text, kind or "info")
+	end
+end
+
+local function announce(title, sub)
+	R.Announce:FireAllClients(title, sub or "")
+end
+
+local function boostActive(player, attr)
+	local t = player:GetAttribute(attr)
+	return t ~= nil and t > Workspace:GetServerTimeNow()
+end
+
+local function getHumanoid(player)
+	local c = player.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function isAlive(player)
+	local h = getHumanoid(player)
+	return h ~= nil and h.Health > 0
+end
+
+local function playingCount()
+	local n = 0
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p:GetAttribute("Playing") then n = n + 1 end
+	end
+	return n
+end
+
+local function alivePlayers()
+	local n = 0
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p:GetAttribute("Playing") and isAlive(p) then n = n + 1 end
+	end
+	return n
+end
+
+local function clampLevel(v)
+	return math.clamp(math.floor(tonumber(v) or 0), 0, MAX_LEVEL)
+end
+
+--========================== PLAYER DATA =================================
+local function newData()
+	return {
+		Coins = CFG.START_COINS, Owned = { Pistol = true }, Upgrades = {},
+		Best = 0, Medkits = 0, Kills = 0, Loaded = false, Dirty = false,
+	}
+end
+
+local function syncStats(player)
+	local d = Data[player]
+	if not d then return end
+	local ls = player:FindFirstChild("leaderstats")
+	if ls then
+		ls.Coins.Value = d.Coins
+		ls.Kills.Value = d.Kills
+		ls.BestWave.Value = d.Best
+	end
+	player:SetAttribute("Medkits", d.Medkits)
+end
+
+local function addCoins(player, n)
+	local d = Data[player]
+	if not d then return end
+	d.Coins = d.Coins + n
+	d.Dirty = true
+	syncStats(player)
+end
+
+local store = nil
+if CFG.SAVE_DATA then
+	local ok = pcall(function() store = DataStoreService:GetDataStore("ZombieAssault_v1") end)
+	if not ok then store = nil end
+end
+
+local function loadData(player)
+	local d = Data[player]
+	if not d or not store then return end
+	local ok, saved = false, nil
+	for _ = 1, 3 do
+		ok, saved = pcall(function() return store:GetAsync("P_" .. player.UserId) end)
+		if ok then break end
+		task.wait(1)
+	end
+	if not ok then
+		warn("[ZombieServer] Could not load save data (is 'Enable Studio Access to API Services' on?). Using fresh data.")
+		return
+	end
+	if type(saved) ~= "table" then return end
+	if type(saved.Coins) == "number" then d.Coins = math.max(0, math.floor(saved.Coins)) end
+	if type(saved.Best) == "number" then d.Best = math.max(0, math.floor(saved.Best)) end
+	if type(saved.Medkits) == "number" then d.Medkits = math.clamp(math.floor(saved.Medkits), 0, CFG.MEDKIT_MAX) end
+	if type(saved.Owned) == "table" then
+		for name, v in pairs(saved.Owned) do
+			if WEAPONS[name] and v == true then d.Owned[name] = true end
+		end
+	end
+	if type(saved.Upgrades) == "table" then
+		for wname, ups in pairs(saved.Upgrades) do
+			if WEAPONS[wname] and type(ups) == "table" then
+				d.Upgrades[wname] = { Damage = clampLevel(ups.Damage), Mag = clampLevel(ups.Mag), Reload = clampLevel(ups.Reload) }
+			end
+		end
+	end
+end
+
+local function saveData(player)
+	local d = Data[player]
+	if not store or not d or not d.Loaded or not d.Dirty then return end
+	d.Dirty = false
+	local payload = { Coins = d.Coins, Best = d.Best, Medkits = d.Medkits, Owned = d.Owned, Upgrades = d.Upgrades }
+	local ok, err = pcall(function() store:SetAsync("P_" .. player.UserId, payload) end)
+	if not ok then
+		d.Dirty = true
+		if not d.saveWarned then
+			d.saveWarned = true
+			warn("[ZombieServer] Save failed (progress still works this session): " .. tostring(err))
+		end
+	end
+end
+
+--========================== MAP =========================================
+local function mk(parent, name, size, cf, color, material)
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.CFrame = cf
+	p.Anchored = true
+	p.Color = color
+	p.Material = material or Enum.Material.SmoothPlastic
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CastShadow = false
+	p.Parent = parent
+	return p
+end
+
+local beaconLights = {}
+
+local function buildMap()
+	local rng = Random.new(1337)
+	local H = CFG.ARENA / 2 -- 150
+	local M = MapFolder
+	local blocked = {} -- circles where random props may NOT be placed
+
+	local function block(x, z, r)
+		table.insert(blocked, { x = x, z = z, r = r })
+	end
+
+	-- ground -------------------------------------------------------------
+	mk(M, "OuterVoid", Vector3.new(1600, 2, 1600), CFrame.new(0, -2.5, 0), Color3.fromRGB(12, 12, 14))
+	mk(M, "Ground", Vector3.new(H * 2 + 16, 2, H * 2 + 16), CFrame.new(0, -1, 0), Color3.fromRGB(46, 44, 38), Enum.Material.Ground)
+
+	-- perimeter wall (tall, so nobody walks or falls out)
+	local wallColor = Color3.fromRGB(38, 38, 42)
+	mk(M, "WallN", Vector3.new(H * 2 + 12, 28, 4), CFrame.new(0, 14, -(H + 2)), wallColor, Enum.Material.Concrete)
+	mk(M, "WallS", Vector3.new(H * 2 + 12, 28, 4), CFrame.new(0, 14, (H + 2)), wallColor, Enum.Material.Concrete)
+	mk(M, "WallW", Vector3.new(4, 28, H * 2 + 12), CFrame.new(-(H + 2), 14, 0), wallColor, Enum.Material.Concrete)
+	mk(M, "WallE", Vector3.new(4, 28, H * 2 + 12), CFrame.new((H + 2), 14, 0), wallColor, Enum.Material.Concrete)
+
+	-- roads ----------------------------------------------------------------
+	local asphalt = Color3.fromRGB(30, 30, 34)
+	mk(M, "RoadNS", Vector3.new(26, 0.2, H * 2), CFrame.new(0, 0.1, 0), asphalt, Enum.Material.Asphalt)
+	mk(M, "RoadEW", Vector3.new(H * 2, 0.22, 26), CFrame.new(0, 0.11, 0), asphalt, Enum.Material.Asphalt)
+	local yellow = Color3.fromRGB(200, 170, 50)
+	for z = -H + 12, H - 12, 14 do
+		if math.abs(z) > 32 then
+			mk(M, "Dash", Vector3.new(0.6, 0.05, 6), CFrame.new(0, 0.26, z), yellow)
+		end
+	end
+	for x = -H + 12, H - 12, 14 do
+		if math.abs(x) > 32 then
+			mk(M, "Dash", Vector3.new(6, 0.05, 0.6), CFrame.new(x, 0.26, 0), yellow)
+		end
+	end
+
+	-- SAFE PLAZA + PLAYER SPAWNS (wide open, nothing to get stuck on) ------
+	local plaza = mk(M, "Plaza", Vector3.new(0.5, 52, 52), CFrame.new(0, 0.25, 0) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(85, 85, 90), Enum.Material.Concrete)
+	plaza.Shape = Enum.PartType.Cylinder
+	block(0, 0, 34)
+
+	local spawnOffsets = { Vector3.new(11, 0, 11), Vector3.new(-11, 0, 11), Vector3.new(11, 0, -11), Vector3.new(-11, 0, -11) }
+	for i, off in ipairs(spawnOffsets) do
+		local sp = Instance.new("SpawnLocation")
+		sp.Name = "PlayerSpawn" .. i
+		sp.Size = Vector3.new(6, 0.4, 6)
+		sp.Position = Vector3.new(off.X, 0.7, off.Z)
+		sp.Anchored = true
+		sp.Neutral = true
+		sp.Duration = 0
+		sp.AllowTeamChangeOnTouch = false
+		sp.Color = Color3.fromRGB(40, 120, 60)
+		sp.Material = Enum.Material.Neon
+		sp.Transparency = 0.5
+		sp.TopSurface = Enum.SurfaceType.Smooth
+		sp.Parent = M
+		for _, c in ipairs(sp:GetChildren()) do
+			if c:IsA("Decal") then c:Destroy() end
+		end
+		table.insert(SpawnPads, sp)
+	end
+
+	-- sandbag walls on the diagonals (cardinal directions stay open)
+	for _, deg in ipairs({ 45, 135, 225, 315 }) do
+		local a = math.rad(deg)
+		mk(M, "Sandbags", Vector3.new(12, 2.5, 2.5),
+			CFrame.new(math.cos(a) * 21, 1.75, math.sin(a) * 21) * CFrame.Angles(0, -(a + math.pi / 2), 0),
+			Color3.fromRGB(120, 105, 75), Enum.Material.Fabric)
+	end
+
+	-- lamps ------------------------------------------------------------------
+	local function lamp(x, z)
+		mk(M, "LampPole", Vector3.new(0.8, 16, 0.8), CFrame.new(x, 8, z), Color3.fromRGB(30, 30, 34), Enum.Material.Metal)
+		local bulb = mk(M, "LampBulb", Vector3.new(2, 0.6, 2), CFrame.new(x, 16.2, z), Color3.fromRGB(255, 225, 170), Enum.Material.Neon)
+		if CFG.LIGHTS then
+			local l = Instance.new("PointLight")
+			l.Range = 30
+			l.Brightness = 1.2
+			l.Color = Color3.fromRGB(255, 215, 150)
+			l.Parent = bulb
+		end
+		block(x, z, 4)
+	end
+	lamp(19, 19); lamp(-19, 19); lamp(19, -19); lamp(-19, -19)
+	lamp(16, -70); lamp(-16, 70); lamp(70, 16); lamp(-70, -16)
+
+	-- ZOMBIE SPAWN ZONES (5, spread around the arena edge) -------------------
+	for k = 0, 4 do
+		local ang = math.rad(-90 + 72 * k)
+		local x, z = math.cos(ang) * 125, math.sin(ang) * 125
+		table.insert(ZombieSpawns, Vector3.new(x, 0, z))
+		local pad = mk(M, "ZombiePad" .. (k + 1), Vector3.new(0.3, 24, 24), CFrame.new(x, 0.3, z) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(85, 14, 14), Enum.Material.Slate)
+		pad.Shape = Enum.PartType.Cylinder
+		mk(M, "BeaconPole", Vector3.new(1, 16, 1), CFrame.new(x, 8, z), Color3.fromRGB(25, 25, 28), Enum.Material.Metal)
+		local top = mk(M, "BeaconLight", Vector3.new(2.4, 2.4, 2.4), CFrame.new(x, 17, z), Color3.fromRGB(255, 30, 30), Enum.Material.Neon)
+		if CFG.LIGHTS then
+			local l = Instance.new("PointLight")
+			l.Range = 34
+			l.Brightness = 2
+			l.Color = Color3.fromRGB(255, 40, 40)
+			l.Parent = top
+			table.insert(beaconLights, l)
+		end
+		block(x, z, 26)
+	end
+
+	-- RUINED BUILDINGS (always have doors / broken gaps - never a trap) -----
+	local function building(cx, cz, w, d, h)
+		mk(M, "Floor", Vector3.new(w, 0.6, d), CFrame.new(cx, 0.3, cz), Color3.fromRGB(55, 55, 58), Enum.Material.Concrete)
+		local sides = {
+			{ axis = "x", fixed = cz - d / 2, from = cx - w / 2, to = cx + w / 2 },
+			{ axis = "x", fixed = cz + d / 2, from = cx - w / 2, to = cx + w / 2 },
+			{ axis = "z", fixed = cx - w / 2, from = cz - d / 2, to = cz + d / 2 },
+			{ axis = "z", fixed = cx + w / 2, from = cz - d / 2, to = cz + d / 2 },
+		}
+		local tones = { Color3.fromRGB(92, 82, 74), Color3.fromRGB(78, 74, 72), Color3.fromRGB(100, 88, 78) }
+		for _, s in ipairs(sides) do
+			local len = s.to - s.from
+			local gapC = s.from + len * (0.3 + rng:NextNumber() * 0.4)
+			local gapW = 11
+			local pos = s.from
+			while pos < s.to - 0.5 do
+				local chunk = math.min(rng:NextNumber(4, 8), s.to - pos)
+				local mid = pos + chunk / 2
+				local touchesGap = (pos < gapC + gapW / 2) and (pos + chunk > gapC - gapW / 2)
+				if (not touchesGap) and rng:NextNumber() > 0.12 then
+					local ch = rng:NextNumber(5, h)
+					local tone = tones[rng:NextInteger(1, #tones)]
+					if s.axis == "x" then
+						mk(M, "Wall", Vector3.new(chunk, ch, 1.5), CFrame.new(mid, ch / 2, s.fixed), tone, Enum.Material.Brick)
+					else
+						mk(M, "Wall", Vector3.new(1.5, ch, chunk), CFrame.new(s.fixed, ch / 2, mid), tone, Enum.Material.Brick)
+					end
+				end
+				pos = pos + chunk
+			end
+		end
+		-- a couple of crates inside for cover
+		mk(M, "Crate", Vector3.new(3.5, 3.5, 3.5), CFrame.new(cx + w / 4, 1.75, cz - d / 5) * CFrame.Angles(0, rng:NextNumber(0, 3), 0), Color3.fromRGB(120, 85, 50), Enum.Material.WoodPlanks)
+		block(cx, cz, math.sqrt(w * w + d * d) / 2 + 4)
+	end
+	building(-55, -70, 30, 26, 14)
+	building(55, -70, 28, 28, 12)
+	building(-50, 52, 32, 30, 15)
+	building(50, 50, 36, 26, 13)
+	building(-102, 40, 26, 34, 12)
+	building(100, 32, 26, 30, 14)
+
+	-- RANDOM PROPS (cover) ---------------------------------------------------
+	local function freeSpot(minR)
+		for _ = 1, 40 do
+			local x = rng:NextNumber(-H + 14, H - 14)
+			local z = rng:NextNumber(-H + 14, H - 14)
+			local ok = true
+			for _, b in ipairs(blocked) do
+				local dx, dz = x - b.x, z - b.z
+				local lim = b.r + minR
+				if dx * dx + dz * dz < lim * lim then ok = false break end
+			end
+			if ok then
+				block(x, z, minR)
+				return x, z
+			end
+		end
+		return nil, nil
+	end
+
+	for _ = 1, 14 do -- concrete barriers
+		local x, z = freeSpot(6)
+		if x then
+			mk(M, "Barrier", Vector3.new(8, 3, 2.2), CFrame.new(x, 1.5, z) * CFrame.Angles(0, rng:NextNumber(0, math.pi), 0), Color3.fromRGB(105, 105, 108), Enum.Material.Concrete)
+		end
+	end
+
+	local carColors = { Color3.fromRGB(110, 40, 35), Color3.fromRGB(45, 60, 90), Color3.fromRGB(80, 80, 82), Color3.fromRGB(95, 85, 40) }
+	for _ = 1, 8 do -- wrecked cars
+		local x, z = freeSpot(10)
+		if x then
+			local base = CFrame.new(x, 0, z) * CFrame.Angles(0, rng:NextNumber(0, math.pi), 0)
+			local col = carColors[rng:NextInteger(1, #carColors)]
+			mk(M, "CarBody", Vector3.new(6.5, 2.2, 13), base * CFrame.new(0, 2.2, 0), col, Enum.Material.Metal)
+			mk(M, "CarCabin", Vector3.new(5.6, 1.8, 6), base * CFrame.new(0, 4.2, 0.5), Color3.fromRGB(28, 32, 38), Enum.Material.Glass)
+			for _, wx in ipairs({ -3.3, 3.3 }) do
+				for _, wz in ipairs({ -4, 4 }) do
+					local wheel = mk(M, "Wheel", Vector3.new(1.2, 2.4, 2.4), base * CFrame.new(wx, 1.2, wz), Color3.fromRGB(15, 15, 15), Enum.Material.SmoothPlastic)
+					wheel.Shape = Enum.PartType.Cylinder
+				end
+			end
+		end
+	end
+
+	for _ = 1, 8 do -- crate piles
+		local x, z = freeSpot(7)
+		if x then
+			local yaw = rng:NextNumber(0, math.pi)
+			local base = CFrame.new(x, 0, z) * CFrame.Angles(0, yaw, 0)
+			mk(M, "Crate", Vector3.new(4, 4, 4), base * CFrame.new(0, 2, 0), Color3.fromRGB(120, 85, 50), Enum.Material.WoodPlanks)
+			mk(M, "Crate", Vector3.new(4, 4, 4), base * CFrame.new(4.2, 2, 0.4), Color3.fromRGB(105, 75, 45), Enum.Material.WoodPlanks)
+			if rng:NextNumber() > 0.5 then
+				mk(M, "Crate", Vector3.new(4, 4, 4), base * CFrame.new(2, 6, 0.2), Color3.fromRGB(130, 92, 55), Enum.Material.WoodPlanks)
+			end
+		end
+	end
+
+	for _ = 1, 4 do -- dumpsters
+		local x, z = freeSpot(6)
+		if x then
+			mk(M, "Dumpster", Vector3.new(6, 4, 3.5), CFrame.new(x, 2, z) * CFrame.Angles(0, rng:NextNumber(0, math.pi), 0), Color3.fromRGB(30, 70, 45), Enum.Material.Metal)
+		end
+	end
+
+	for _ = 1, 10 do -- dead trees
+		local x, z = freeSpot(5)
+		if x then
+			mk(M, "TreeTrunk", Vector3.new(1.4, 12, 1.4), CFrame.new(x, 6, z), Color3.fromRGB(45, 32, 24), Enum.Material.Wood)
+			for _ = 1, 2 do
+				mk(M, "TreeBranch", Vector3.new(0.6, 0.6, 5),
+					CFrame.new(x, 9 + rng:NextNumber(-1, 1.5), z) * CFrame.Angles(rng:NextNumber(-0.6, 0.6), rng:NextNumber(0, 6.28), 0) * CFrame.new(0, 0, -2),
+					Color3.fromRGB(45, 32, 24), Enum.Material.Wood)
+			end
+		end
+	end
+
+	-- warning-light flicker (cheap: 5 lights, updated a few times per second)
+	if #beaconLights > 0 then
+		task.spawn(function()
+			while true do
+				local t = os.clock()
+				for i, l in ipairs(beaconLights) do
+					if l.Parent then
+						l.Brightness = 0.8 + math.abs(math.sin(t * 2.2 + i)) * 2.2
+					end
+				end
+				task.wait(0.15)
+			end
+		end)
+	end
+end
+
+local function buildAtmosphere()
+	Lighting.ClockTime = 0
+	Lighting.Brightness = 1.4
+	Lighting.Ambient = Color3.fromRGB(62, 62, 82)
+	Lighting.OutdoorAmbient = Color3.fromRGB(70, 74, 100)
+	Lighting.FogColor = Color3.fromRGB(16, 18, 26)
+	Lighting.FogStart = 70
+	Lighting.FogEnd = 430
+	Lighting.GlobalShadows = false
+	for _, c in ipairs(Lighting:GetChildren()) do
+		if c.Name == "ZA_Atmosphere" or c.Name == "ZA_Color" then c:Destroy() end
+	end
+	local atm = Instance.new("Atmosphere")
+	atm.Name = "ZA_Atmosphere"
+	atm.Density = 0.3
+	atm.Offset = 0.2
+	atm.Color = Color3.fromRGB(60, 65, 85)
+	atm.Decay = Color3.fromRGB(25, 25, 35)
+	atm.Parent = Lighting
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Name = "ZA_Color"
+	cc.Saturation = -0.25
+	cc.Contrast = 0.1
+	cc.TintColor = Color3.fromRGB(255, 232, 232)
+	cc.Parent = Lighting
+end
+
+buildAtmosphere()
+buildMap()
+
+local groundParams = RaycastParams.new()
+groundParams.FilterType = Enum.RaycastFilterType.Include
+groundParams.FilterDescendantsInstances = { MapFolder }
+
+local mapRayParams = RaycastParams.new()
+mapRayParams.FilterType = Enum.RaycastFilterType.Include
+mapRayParams.FilterDescendantsInstances = { MapFolder }
+
+-- Safe place to put a player: picks the pad with the fewest players on it
+local function getSpawnCFrame()
+	local best, bestScore = SpawnPads[1], math.huge
+	local order = {}
+	for _, p in ipairs(SpawnPads) do table.insert(order, p) end
+	for i = #order, 2, -1 do
+		local j = math.random(1, i)
+		order[i], order[j] = order[j], order[i]
+	end
+	for _, pad in ipairs(order) do
+		local score = 0
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local c = plr.Character
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if r and (r.Position - pad.Position).Magnitude < 7 then score = score + 1 end
+		end
+		if score < bestScore then best, bestScore = pad, score end
+	end
+	local off = Vector3.new(math.random(-20, 20) / 10, 0, math.random(-20, 20) / 10)
+	return CFrame.new(best.Position + off + Vector3.new(0, 4, 0)) * CFrame.Angles(0, math.rad(math.random(0, 359)), 0)
+end
+
+--========================== WEAPONS =====================================
+local function weaponStats(player, wname)
+	local W = WEAPONS[wname]
+	local d = Data[player]
+	local u = d and d.Upgrades[wname]
+	if not u then
+		u = { Damage = 0, Mag = 0, Reload = 0 }
+		if d then d.Upgrades[wname] = u end
+	end
+	return {
+		damage = W.Damage * (1 + 0.15 * u.Damage),
+		mag = math.floor(W.Mag * (1 + 0.25 * u.Mag) + 0.5),
+		reload = W.Reload * (1 - 0.10 * u.Reload),
+		levels = u,
+	}
+end
+
+local function upgradeCost(wname, level)
+	local base = 100 + WEAPONS[wname].Price * 0.25
+	return math.floor(base * ((level + 1) ^ 1.3))
+end
+
+local function findTool(player, wname)
+	local char = player.Character
+	if char then
+		local t = char:FindFirstChild(wname)
+		if t and t:IsA("Tool") then return t end
+	end
+	local bp = player:FindFirstChildOfClass("Backpack")
+	if bp then
+		local t = bp:FindFirstChild(wname)
+		if t and t:IsA("Tool") then return t end
+	end
+	return nil
+end
+
+local function buildTool(player, wname)
+	local W = WEAPONS[wname]
+	local st = weaponStats(player, wname)
+	local tool = Instance.new("Tool")
+	tool.Name = wname
+	tool.ToolTip = wname
+	tool.CanBeDropped = false
+	tool.RequiresHandle = true
+	tool.Grip = CFrame.new(0, -0.45, W.Len * 0.25)
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.new(0.35, 0.55, W.Len)
+	handle.Color = W.Color
+	handle.Material = Enum.Material.Metal
+	handle.CanCollide = false
+	handle.Parent = tool
+
+	local function addPart(name, size, offset, color)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.Color = color
+		p.Material = Enum.Material.Metal
+		p.CanCollide = false
+		p.Massless = true
+		p.Parent = tool
+		local w = Instance.new("Weld")
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = CFrame.new(offset)
+		w.Parent = p
+	end
+	addPart("Barrel", Vector3.new(0.2, 0.2, W.Len * 0.4), Vector3.new(0, 0.1, -(W.Len / 2 + W.Len * 0.15)), W.Color)
+	addPart("Grip", Vector3.new(0.28, 0.7, 0.35), Vector3.new(0, -0.5, W.Len * 0.25), Color3.fromRGB(25, 25, 28))
+	addPart("Accent", Vector3.new(0.38, 0.12, W.Len * 0.5), Vector3.new(0, 0.3, -W.Len * 0.05), W.Accent)
+	if wname == "Sniper" then
+		addPart("Scope", Vector3.new(0.25, 0.25, 1), Vector3.new(0, 0.5, -0.2), Color3.fromRGB(20, 20, 24))
+	end
+
+	tool:SetAttribute("Weapon", wname)
+	tool:SetAttribute("Ammo", st.mag)
+	tool:SetAttribute("Reserve", W.Reserve)
+	tool:SetAttribute("MagSize", st.mag)
+	tool:SetAttribute("Reloading", false)
+	tool:SetAttribute("ReloadTime", st.reload)
+	tool:SetAttribute("FireRate", W.FireRate)
+	tool:SetAttribute("Auto", W.Auto)
+
+	tool.Unequipped:Connect(function()
+		-- unequipping cancels a reload
+		tool:SetAttribute("RToken", (tool:GetAttribute("RToken") or 0) + 1)
+		tool:SetAttribute("Reloading", false)
+	end)
+	return tool
+end
+
+local function giveWeapon(player, wname)
+	local bp = player:FindFirstChildOfClass("Backpack")
+	if not bp or not WEAPONS[wname] then return nil end
+	local old = findTool(player, wname)
+	if old then old:Destroy() end
+	local tool = buildTool(player, wname)
+	tool.Parent = bp
+	return tool
+end
+
+local function refreshTool(player, wname)
+	local tool = findTool(player, wname)
+	if not tool then return end
+	local st = weaponStats(player, wname)
+	tool:SetAttribute("MagSize", st.mag)
+	tool:SetAttribute("ReloadTime", st.reload)
+end
+
+local function startReload(player, tool)
+	if not tool or not tool.Parent then return end
+	if tool:GetAttribute("Reloading") then return end
+	local wname = tool:GetAttribute("Weapon")
+	if not WEAPONS[wname] then return end
+	local st = weaponStats(player, wname)
+	local ammo = tool:GetAttribute("Ammo") or 0
+	local reserve = tool:GetAttribute("Reserve") or 0
+	if ammo >= st.mag or reserve <= 0 then return end
+
+	local token = (tool:GetAttribute("RToken") or 0) + 1
+	tool:SetAttribute("RToken", token)
+	tool:SetAttribute("Reloading", true)
+	tool:SetAttribute("ReloadTime", st.reload)
+	tool:SetAttribute("ReloadEnd", Workspace:GetServerTimeNow() + st.reload)
+	task.delay(st.reload, function()
+		if not tool.Parent then return end
+		if tool:GetAttribute("RToken") ~= token or not tool:GetAttribute("Reloading") then return end
+		local cur = tool:GetAttribute("Ammo") or 0
+		local res = tool:GetAttribute("Reserve") or 0
+		local need = math.max(0, st.mag - cur)
+		local take = math.min(need, res)
+		tool:SetAttribute("Ammo", cur + take)
+		tool:SetAttribute("Reserve", res - take)
+		tool:SetAttribute("Reloading", false)
+	end)
+end
+
+--========================== ZOMBIES =====================================
+local R6 = {
+	RootJoint = { c0 = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0), c1 = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0) },
+	Neck = { c0 = CFrame.new(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0), c1 = CFrame.new(0, -0.5, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0) },
+	["Right Shoulder"] = { c0 = CFrame.new(1, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0), c1 = CFrame.new(-0.5, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0) },
+	["Left Shoulder"] = { c0 = CFrame.new(-1, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0), c1 = CFrame.new(0.5, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0) },
+	["Right Hip"] = { c0 = CFrame.new(1, -1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0), c1 = CFrame.new(0.5, 1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0) },
+	["Left Hip"] = { c0 = CFrame.new(-1, -1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0), c1 = CFrame.new(-0.5, 1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0) },
+}
+
+local function scaleCF(cf, s)
+	local p = cf.Position * s
+	return CFrame.new(p) * (cf - cf.Position)
+end
+
+local function buildZombie(typeName, nPlayers)
+	local def = ZOMBIES[typeName]
+	local s = def.Scale
+	local model = Instance.new("Model")
+	model.Name = typeName .. "Zombie"
+
+	local function mkPart(name, size, color)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size * s
+		p.Color = color
+		p.Material = Enum.Material.SmoothPlastic
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		p.Parent = model
+		if ZG_OK then p.CollisionGroup = "ZA_Zombies" end
+		return p
+	end
+
+	local hrp = mkPart("HumanoidRootPart", Vector3.new(2, 2, 1), def.Shirt)
+	hrp.Transparency = 1
+	local torso = mkPart("Torso", Vector3.new(2, 2, 1), def.Shirt)
+	local head = mkPart("Head", Vector3.new(2, 1, 1), def.Skin)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Head
+	mesh.Scale = Vector3.new(1.25, 1.25, 1.25)
+	mesh.Parent = head
+	local rarm = mkPart("Right Arm", Vector3.new(1, 2, 1), def.Skin)
+	local larm = mkPart("Left Arm", Vector3.new(1, 2, 1), def.Skin)
+	local rleg = mkPart("Right Leg", Vector3.new(1, 2, 1), def.Pants)
+	local lleg = mkPart("Left Leg", Vector3.new(1, 2, 1), def.Pants)
+	rarm.CanCollide = false; larm.CanCollide = false
+	rleg.CanCollide = false; lleg.CanCollide = false
+
+	local base = CFrame.new(0, 100, 0)
+	hrp.CFrame = base
+	torso.CFrame = base
+	head.CFrame = base * CFrame.new(0, 1.5 * s, 0)
+	rarm.CFrame = base * CFrame.new(1.5 * s, 0, 0)
+	larm.CFrame = base * CFrame.new(-1.5 * s, 0, 0)
+	rleg.CFrame = base * CFrame.new(0.5 * s, -2 * s, 0)
+	lleg.CFrame = base * CFrame.new(-0.5 * s, -2 * s, 0)
+
+	local function joint(name, p0, p1)
+		local m = Instance.new("Motor6D")
+		m.Name = name
+		m.Part0 = p0
+		m.Part1 = p1
+		m.C0 = scaleCF(R6[name].c0, s)
+		m.C1 = scaleCF(R6[name].c1, s)
+		m.Parent = p0
+		return m
+	end
+	joint("RootJoint", hrp, torso)
+	joint("Neck", torso, head)
+	local rs = joint("Right Shoulder", torso, rarm)
+	local ls = joint("Left Shoulder", torso, larm)
+	joint("Right Hip", torso, rleg)
+	joint("Left Hip", torso, lleg)
+	-- classic zombie pose: both arms stretched out in front
+	rs.C0 = rs.C0 * CFrame.Angles(0, 0, math.rad(90))
+	ls.C0 = ls.C0 * CFrame.Angles(0, 0, math.rad(-90))
+
+	-- glowing eyes (readable in the dark)
+	for _, xo in ipairs({ -0.3, 0.3 }) do
+		local e = Instance.new("Part")
+		e.Name = "Eye"
+		e.Size = Vector3.new(0.25, 0.18, 0.1) * s
+		e.Color = def.Eyes
+		e.Material = Enum.Material.Neon
+		e.CanCollide = false
+		e.Massless = true
+		e.CFrame = head.CFrame * CFrame.new(xo * s, 0.12 * s, -0.66 * s)
+		e.Parent = model
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = head
+		w.Part1 = e
+		w.Parent = e
+	end
+
+	local hum = Instance.new("Humanoid")
+	hum.RigType = Enum.HumanoidRigType.R6
+	local hp = def.Health * (1 + 0.14 * (Wave - 1)) * (1 + 0.25 * (nPlayers - 1))
+	hum.MaxHealth = hp
+	hum.Health = hp
+	local speed = def.Speed * math.min(1.35, 1 + 0.015 * (Wave - 1))
+	hum.WalkSpeed = speed
+	hum.UseJumpPower = true
+	hum.JumpPower = 50
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	hum.Parent = model
+
+	model.PrimaryPart = hrp
+	model:SetAttribute("ZType", typeName)
+	model:SetAttribute("Scale", s)
+	CollectionService:AddTag(model, "Zombie")
+	return model, hum, hrp, speed
+end
+
+local function groundPoint(center, radius)
+	for _ = 1, 8 do
+		local a = math.random() * math.pi * 2
+		local r = math.sqrt(math.random()) * radius
+		local x, z = center.X + math.cos(a) * r, center.Z + math.sin(a) * r
+		local res = Workspace:Raycast(Vector3.new(x, 60, z), Vector3.new(0, -120, 0), groundParams)
+		if res and res.Position.Y < 1.2 then
+			return Vector3.new(x, res.Position.Y, z)
+		end
+	end
+	return Vector3.new(center.X, 0.5, center.Z)
+end
+
+local function pickZombieSpawn()
+	local idx = {}
+	for i = 1, #ZombieSpawns do idx[i] = i end
+	for i = #idx, 2, -1 do
+		local j = math.random(1, i)
+		idx[i], idx[j] = idx[j], idx[i]
+	end
+	for _, i in ipairs(idx) do
+		local sp = ZombieSpawns[i]
+		local clear = true
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local c = plr.Character
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if r and (r.Position - sp).Magnitude < 45 then clear = false break end
+		end
+		if clear then return sp end
+	end
+	return ZombieSpawns[idx[1]]
+end
+
+local onZombieDied -- forward declaration
+
+local function spawnZombieAt(typeName, groundPos)
+	local def = ZOMBIES[typeName]
+	local nPlayers = math.max(1, playingCount())
+	local model, hum, hrp, speed = buildZombie(typeName, nPlayers)
+	model:PivotTo(CFrame.new(groundPos + Vector3.new(0, 3 * def.Scale + 0.8, 0)) * CFrame.Angles(0, math.random() * 6.28, 0))
+	model.Parent = ZombieFolder
+	pcall(function() hrp:SetNetworkOwner(nil) end)
+
+	local now = os.clock()
+	local z = {
+		model = model, hum = hum, hrp = hrp, type = typeName, def = def, speed = speed,
+		damage = def.Damage * (1 + 0.04 * (Wave - 1)),
+		nextAttack = 0, nextPathTime = 0, computing = false,
+		waypoints = nil, wpIndex = 2, pathTarget = nil,
+		lastPos = hrp.Position, stuck = 0,
+		nextSlam = now + 6, nextSummon = now + 14, nextCharge = now + 5, chargeUntil = 0,
+		pathParams = {
+			AgentRadius = def.Boss and 5 or (def.Scale > 1.2 and 3.5 or 2.8),
+			AgentHeight = 5 * math.max(1, def.Scale),
+			AgentCanJump = true,
+			AgentCanClimb = false,
+			WaypointSpacing = 7,
+		},
+	}
+	table.insert(Alive, z)
+	hum.Died:Connect(function() onZombieDied(z) end)
+
+	if def.Boss then
+		Workspace:SetAttribute("BossName", "BOSS ZOMBIE")
+		Workspace:SetAttribute("BossMax", hum.MaxHealth)
+		Workspace:SetAttribute("BossHealth", hum.Health)
+		hum.HealthChanged:Connect(function(h)
+			Workspace:SetAttribute("BossHealth", math.max(0, h))
+		end)
+	end
+	return z
+end
+
+local function spawnZombie(typeName)
+	local gp = groundPoint(pickZombieSpawn(), 9)
+	return spawnZombieAt(typeName, gp)
+end
+
+onZombieDied = function(z)
+	if z.dead then return end
+	z.dead = true
+	for i, a in ipairs(Alive) do
+		if a == z then
+			table.remove(Alive, i)
+			break
+		end
+	end
+
+	-- reward the player who landed the last hit
+	local uid = z.model:GetAttribute("Attacker")
+	local plr = uid and Players:GetPlayerByUserId(uid)
+	if plr and Data[plr] then
+		local reward = z.def.Reward + math.floor(Wave * 1.5)
+		addCoins(plr, reward)
+		Data[plr].Kills = Data[plr].Kills + 1
+		syncStats(plr)
+		notify(plr, "+$" .. reward .. "  " .. z.type .. " killed", "reward")
+	end
+
+	if z.def.Boss then
+		Workspace:SetAttribute("BossMax", 0)
+		Workspace:SetAttribute("BossHealth", 0)
+		announce("BOSS DEFEATED", "Well done, survivors!")
+	end
+
+	-- blood burst
+	pcall(function()
+		local fx = Instance.new("Part")
+		fx.Anchored = true
+		fx.CanCollide = false
+		fx.CanQuery = false
+		fx.CanTouch = false
+		fx.Transparency = 1
+		fx.Size = Vector3.new(1, 1, 1)
+		fx.Position = z.hrp.Position
+		fx.Parent = ZombieFolder
+		local em = Instance.new("ParticleEmitter")
+		em.Color = ColorSequence.new(Color3.fromRGB(150, 10, 10))
+		em.Size = NumberSequence.new(0.6, 0.1)
+		em.Lifetime = NumberRange.new(0.4, 0.8)
+		em.Speed = NumberRange.new(10, 22)
+		em.SpreadAngle = Vector2.new(180, 180)
+		em.Rate = 0
+		em.Parent = fx
+		em:Emit(18)
+		Debris:AddItem(fx, 1.5)
+	end)
+
+	for _, p in ipairs(z.model:GetDescendants()) do
+		if p:IsA("BasePart") then p.CanQuery = false end
+	end
+	task.delay(2.2, function()
+		if not z.model.Parent then return end
+		for _, p in ipairs(z.model:GetDescendants()) do
+			if p:IsA("BasePart") and p.Transparency < 1 then
+				TweenService:Create(p, TweenInfo.new(1), { Transparency = 1 }):Play()
+			end
+		end
+	end)
+	Debris:AddItem(z.model, 3.5)
+end
+
+local function clearZombies()
+	for _, z in ipairs(Alive) do
+		z.dead = true
+		if z.model then z.model:Destroy() end
+	end
+	Alive = {}
+	Queue = {}
+	for _, c in ipairs(ZombieFolder:GetChildren()) do c:Destroy() end
+	Workspace:SetAttribute("BossMax", 0)
+	Workspace:SetAttribute("BossHealth", 0)
+	Workspace:SetAttribute("ZombiesLeft", 0)
+end
+
+local function requestPath(z, targetPos)
+	if z.computing or pathBusy >= CFG.MAX_PATHS_AT_ONCE then return end
+	z.computing = true
+	pathBusy = pathBusy + 1
+	local startPos = z.hrp.Position
+	task.spawn(function()
+		local ok, path = pcall(function()
+			local p = PathfindingService:CreatePath(z.pathParams)
+			p:ComputeAsync(startPos, targetPos)
+			return p
+		end)
+		if ok and path.Status == Enum.PathStatus.Success then
+			z.waypoints = path:GetWaypoints()
+			z.wpIndex = 2
+			z.pathTarget = targetPos
+		else
+			z.waypoints = nil
+		end
+		z.nextPathTime = os.clock() + CFG.PATH_REFRESH + math.random() * 0.5
+		z.computing = false
+		pathBusy = pathBusy - 1
+	end)
+end
+
+local function bossSlam(z)
+	local center = z.hrp.Position
+	local groundY = center.Y - 3 * z.def.Scale
+	local ring = Instance.new("Part")
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Anchored = true
+	ring.CanCollide = false
+	ring.CanQuery = false
+	ring.CanTouch = false
+	ring.Material = Enum.Material.Neon
+	ring.Color = Color3.fromRGB(255, 40, 40)
+	ring.Transparency = 0.5
+	ring.Size = Vector3.new(0.3, 4, 4)
+	ring.CFrame = CFrame.new(center.X, groundY + 0.4, center.Z) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Parent = Workspace
+	TweenService:Create(ring, TweenInfo.new(0.8, Enum.EasingStyle.Linear), { Size = Vector3.new(0.3, 44, 44) }):Play()
+	Debris:AddItem(ring, 1)
+	z.model:SetAttribute("AtkT", Workspace:GetServerTimeNow())
+
+	task.delay(0.8, function()
+		if z.dead then return end
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local c = plr.Character
+			local h = c and c:FindFirstChildOfClass("Humanoid")
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if h and r and h.Health > 0 then
+				local dx, dz = r.Position.X - center.X, r.Position.Z - center.Z
+				local d = math.sqrt(dx * dx + dz * dz)
+				if d <= 22 then
+					h:TakeDamage(35)
+					local dir = d > 0.1 and Vector3.new(dx / d, 0, dz / d) or Vector3.new(0, 0, 1)
+					r.AssemblyLinearVelocity = Vector3.new(dir.X * 50, 35, dir.Z * 50)
+				end
+			end
+		end
+	end)
+end
+
+local function bossSummon(z)
+	announce("THE BOSS CALLS FOR HELP!", "")
+	for _ = 1, 3 do
+		if #Alive < CFG.MAX_ALIVE + 6 then
+			local a = math.random() * math.pi * 2
+			local p = z.hrp.Position + Vector3.new(math.cos(a) * 10, 0, math.sin(a) * 10)
+			spawnZombieAt("Runner", groundPoint(p, 3))
+		end
+	end
+end
+
+local function relocateZombie(z)
+	local gp = groundPoint(pickZombieSpawn(), 9)
+	z.hrp.CFrame = CFrame.new(gp + Vector3.new(0, 3 * z.def.Scale + 0.8, 0))
+	z.waypoints = nil
+end
+
+local function stepZombie(z, now, targets)
+	local hum, hrp, def = z.hum, z.hrp, z.def
+	if z.dead or hum.Health <= 0 or not hrp.Parent then return end
+	local pos = hrp.Position
+	if pos.Y < -30 then
+		hum.Health = 0
+		return
+	end
+
+	local best, bestD = nil, math.huge
+	for _, t in ipairs(targets) do
+		local d = (t.hrp.Position - pos).Magnitude
+		if d < bestD then best, bestD = t, d end
+	end
+	if not best then
+		hum:MoveTo(pos)
+		return
+	end
+	local tp = best.hrp.Position
+
+	-- special abilities
+	if def.Charge then
+		if now >= z.nextCharge and bestD < 60 then
+			z.nextCharge = now + 9
+			z.chargeUntil = now + 2.2
+			hum.WalkSpeed = z.speed * 1.8
+		end
+		if z.chargeUntil > 0 and now >= z.chargeUntil then
+			z.chargeUntil = 0
+			hum.WalkSpeed = z.speed
+		end
+	end
+	if def.Boss then
+		if (not z.enraged) and hum.Health < hum.MaxHealth * 0.5 then
+			z.enraged = true
+			z.speed = z.speed * 1.3
+			hum.WalkSpeed = z.speed
+			announce("THE BOSS IS ENRAGED!", "")
+		end
+		if now >= z.nextSlam and bestD < 32 then
+			z.nextSlam = now + 7
+			bossSlam(z)
+		end
+		if now >= z.nextSummon then
+			z.nextSummon = now + 18
+			bossSummon(z)
+		end
+	end
+
+	-- attack
+	if bestD <= def.Range then
+		hum:MoveTo(pos)
+		local flat = Vector3.new(tp.X, pos.Y, tp.Z)
+		if (flat - pos).Magnitude > 0.1 then
+			hrp.CFrame = CFrame.lookAt(pos, flat)
+		end
+		z.stuck = 0
+		if now >= z.nextAttack then
+			z.nextAttack = now + def.Cooldown
+			z.model:SetAttribute("AtkT", Workspace:GetServerTimeNow())
+			best.hum:TakeDamage(z.damage)
+		end
+		return
+	end
+
+	-- stuck detection
+	local moved = (pos - z.lastPos).Magnitude
+	z.lastPos = pos
+	if moved < 0.25 then z.stuck = z.stuck + CFG.AI_TICK else z.stuck = 0 end
+	if z.stuck > 0.8 then hum.Jump = true end
+	if z.stuck > 2 then
+		z.waypoints = nil
+		z.nextPathTime = 0
+	end
+	if z.stuck > 6 then
+		relocateZombie(z)
+		z.stuck = 0
+		return
+	end
+
+	-- direct line of sight? run straight at them. Otherwise use pathfinding.
+	local clear = false
+	if bestD < 70 then
+		local o = pos + Vector3.new(0, 1, 0)
+		local hit = Workspace:Raycast(o, (tp + Vector3.new(0, 1, 0)) - o, mapRayParams)
+		clear = (hit == nil)
+	end
+
+	if clear then
+		z.waypoints = nil
+		hum:MoveTo(tp)
+		return
+	end
+
+	if now >= z.nextPathTime then
+		requestPath(z, tp)
+	end
+	local wps = z.waypoints
+	if wps then
+		local wp = wps[z.wpIndex]
+		while wp do
+			local dx, dz = wp.Position.X - pos.X, wp.Position.Z - pos.Z
+			if math.sqrt(dx * dx + dz * dz) < 3.5 then
+				z.wpIndex = z.wpIndex + 1
+				wp = wps[z.wpIndex]
+			else
+				break
+			end
+		end
+		if wp then
+			hum:MoveTo(wp.Position)
+			if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+		else
+			z.waypoints = nil
+			hum:MoveTo(tp)
+		end
+	else
+		hum:MoveTo(tp)
+	end
+end
+
+local function gatherTargets()
+	local list = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr:GetAttribute("Playing") then
+			local c = plr.Character
+			local h = c and c:FindFirstChildOfClass("Humanoid")
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if h and r and h.Health > 0 then
+				table.insert(list, { plr = plr, hum = h, hrp = r })
+			end
+		end
+	end
+	return list
+end
+
+-- zombie brain loop (one loop for ALL zombies = cheap)
+task.spawn(function()
+	while true do
+		if #Alive > 0 then
+			local now = os.clock()
+			local targets = gatherTargets()
+			for i = #Alive, 1, -1 do
+				local z = Alive[i]
+				if z then
+					local ok, err = pcall(stepZombie, z, now, targets)
+					if not ok then warn("[ZombieServer] AI error: " .. tostring(err)) end
+				end
+			end
+		end
+		task.wait(CFG.AI_TICK)
+	end
+end)
+
+--========================== WAVES =======================================
+local function setPhase(p) Workspace:SetAttribute("Phase", p) end
+
+local function setWave(n)
+	Wave = n
+	Workspace:SetAttribute("Wave", n)
+	if n > 0 then
+		for _, p in ipairs(Players:GetPlayers()) do
+			local d = Data[p]
+			if d and p:GetAttribute("Playing") and n > d.Best then
+				d.Best = n
+				d.Dirty = true
+				syncStats(p)
+			end
+		end
+	end
+end
+
+local function updateLeft()
+	Workspace:SetAttribute("ZombiesLeft", #Queue + #Alive)
+end
+
+local function composeWave(wave, nPlayers)
+	local mult = 1 + (nPlayers - 1) * 0.6
+	local isBoss = wave % CFG.BOSS_EVERY == 0
+	local total = math.min(80, math.floor((6 + wave * 2.6) * mult))
+	if isBoss then total = math.floor(total * 0.5) end
+	local runnerChance = wave >= 2 and math.min(0.35, 0.10 + wave * 0.02) or 0
+	local tankChance = wave >= 3 and math.min(0.22, 0.04 + wave * 0.012) or 0
+	local mutantChance = wave >= 6 and math.min(0.18, 0.03 + (wave - 6) * 0.012) or 0
+	local list = {}
+	for _ = 1, total do
+		local r = math.random()
+		local t = "Normal"
+		if r < mutantChance then
+			t = "Mutant"
+		elseif r < mutantChance + tankChance then
+			t = "Tank"
+		elseif r < mutantChance + tankChance + runnerChance then
+			t = "Runner"
+		end
+		table.insert(list, t)
+	end
+	if isBoss then table.insert(list, "Boss") end -- last in list = spawned first
+	return list
+end
+
+local function runWave(wave)
+	setPhase("Active")
+	Queue = composeWave(wave, math.max(1, playingCount()))
+	updateLeft()
+	while true do
+		if alivePlayers() == 0 then return "wiped" end
+		while #Queue > 0 and #Alive < CFG.MAX_ALIVE do
+			local t = table.remove(Queue)
+			spawnZombie(t)
+			updateLeft()
+			task.wait(0.4)
+			if alivePlayers() == 0 then return "wiped" end
+		end
+		updateLeft()
+		if #Queue == 0 and #Alive == 0 then return "cleared" end
+		task.wait(0.5)
+	end
+end
+
+local function spawnPlayer(player)
+	if not Data[player] then return end
+	local last = player:GetAttribute("_lastSpawn") or 0
+	if os.clock() - last < 1.5 then return end -- avoid double spawns
+	player:SetAttribute("_lastSpawn", os.clock())
+	player:SetAttribute("Playing", true)
+	player:SetAttribute("Dead", false)
+	local ok, err = pcall(function() player:LoadCharacter() end)
+	if not ok then warn("[ZombieServer] LoadCharacter failed: " .. tostring(err)) end
+end
+
+local function respawnDeadPlayers()
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p:GetAttribute("Playing") and not isAlive(p) then
+			task.spawn(spawnPlayer, p)
+		end
+	end
+end
+
+local function giveWaveRewards()
+	local bonus = 50 + Wave * 25
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p:GetAttribute("Playing") and isAlive(p) then
+			addCoins(p, bonus)
+			notify(p, "Wave " .. Wave .. " cleared!  +$" .. bonus, "reward")
+			-- top up a bit of reserve ammo
+			local char = p.Character
+			local bp = p:FindFirstChildOfClass("Backpack")
+			local function topUp(tool)
+				if tool:IsA("Tool") then
+					local W = WEAPONS[tool:GetAttribute("Weapon")]
+					if W then
+						local res = tool:GetAttribute("Reserve") or 0
+						tool:SetAttribute("Reserve", math.min(W.Reserve * 2, res + math.ceil(W.Reserve * 0.35)))
+					end
+				end
+			end
+			if char then for _, t in ipairs(char:GetChildren()) do topUp(t) end end
+			if bp then for _, t in ipairs(bp:GetChildren()) do topUp(t) end end
+			local h = getHumanoid(p)
+			if h then h.Health = math.min(h.MaxHealth, h.Health + 25) end
+		end
+	end
+end
+
+local function countdown(phase, secs)
+	setPhase(phase)
+	for i = secs, 1, -1 do
+		Workspace:SetAttribute("Countdown", i)
+		task.wait(1)
+		if playingCount() == 0 then return false end
+	end
+	Workspace:SetAttribute("Countdown", 0)
+	return true
+end
+
+local function playRound()
+	clearZombies()
+	setWave(0)
+	announce("GET READY", "Zombies are coming...")
+	if not countdown("Countdown", CFG.START_COUNTDOWN) then return "empty" end
+	while true do
+		setWave(Wave + 1)
+		local isBoss = Wave % CFG.BOSS_EVERY == 0
+		announce("WAVE " .. Wave, isBoss and "BOSS WAVE - brace yourselves!" or "Survive!")
+		local res = runWave(Wave)
+		if playingCount() == 0 then return "empty" end
+		if res ~= "cleared" then return res end
+		giveWaveRewards()
+		respawnDeadPlayers()
+		announce("WAVE CLEARED", "Visit the shop! Next wave soon.")
+		if not countdown("Intermission", CFG.BREAK_TIME) then return "empty" end
+	end
+end
+
+task.spawn(function()
+	while true do
+		if playingCount() == 0 then
+			if Wave ~= 0 or #Alive > 0 then
+				clearZombies()
+				setWave(0)
+			end
+			setPhase("Waiting")
+			task.wait(1)
+		else
+			local reason = playRound()
+			clearZombies()
+			if reason == "wiped" then
+				setPhase("GameOver")
+				announce("GAME OVER", "Survivors reached wave " .. Wave)
+				restartRequested = false
+				local t0 = os.clock()
+				repeat task.wait(0.5) until restartRequested or os.clock() - t0 > 15 or playingCount() == 0
+				respawnDeadPlayers()
+			end
+		end
+	end
+end)
+
+--========================== PLAYER LIFECYCLE ============================
+local function applyBoosts(player)
+	local h = getHumanoid(player)
+	if h then
+		h.WalkSpeed = boostActive(player, "SpeedBoostUntil") and 22 or 16
+	end
+end
+
+local function onPlayerDied(player)
+	player:SetAttribute("Dead", true)
+	local d = Data[player]
+	if d then
+		if Wave > d.Best then
+			d.Best = Wave
+			d.Dirty = true
+			syncStats(player)
+		end
+		R.GameOver:FireClient(player, Wave, d.Best, d.Kills)
+	end
+end
+
+local function setupCharacter(player, char)
+	if not player:GetAttribute("Playing") then
+		char:Destroy() -- stray auto-spawned character (menu is showing)
+		return
+	end
+	local hum = char:WaitForChild("Humanoid", 10)
+	local hrp = char:WaitForChild("HumanoidRootPart", 10)
+	if not hum or not hrp or not Data[player] then return end
+
+	if hum.RigType ~= Enum.HumanoidRigType.R6 then
+		notify(player, "Set Avatar Type to R6: Home > Game Settings > Avatar", "bad")
+	end
+
+	char:PivotTo(getSpawnCFrame())
+	local ff = Instance.new("ForceField")
+	ff.Visible = true
+	ff.Parent = char
+	Debris:AddItem(ff, 4)
+
+	hum.MaxHealth = 100
+	hum.Health = 100
+	player:SetAttribute("Dead", false)
+	applyBoosts(player)
+	hum.Died:Connect(function() onPlayerDied(player) end)
+
+	local bp = player:WaitForChild("Backpack", 5)
+	if not bp then return end
+	local d = Data[player]
+	local first = nil
+	for _, wname in ipairs(WEAPON_ORDER) do
+		if d.Owned[wname] then
+			local t = giveWeapon(player, wname)
+			if not first then first = t end
+		end
+	end
+	task.wait(0.15)
+	if first and first.Parent == bp and hum.Health > 0 then
+		hum:EquipTool(first)
+	end
+end
+
+local function onPlayerAdded(player)
+	Data[player] = newData()
+	local ls = Instance.new("Folder")
+	ls.Name = "leaderstats"
+	for _, n in ipairs({ "Coins", "Kills", "BestWave" }) do
+		local v = Instance.new("IntValue")
+		v.Name = n
+		v.Parent = ls
+	end
+	ls.Parent = player
+	syncStats(player)
+
+	player.CharacterAdded:Connect(function(char)
+		task.spawn(setupCharacter, player, char)
+	end)
+	if player.Character then
+		task.spawn(setupCharacter, player, player.Character)
+	end
+
+	task.spawn(function()
+		loadData(player)
+		if Data[player] then
+			Data[player].Loaded = true
+			syncStats(player)
+			player:SetAttribute("Loaded", true)
+		end
+	end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, p in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, p)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	saveData(player)
+	Data[player] = nil
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(60)
+		for _, p in ipairs(Players:GetPlayers()) do
+			saveData(p)
+		end
+	end
+end)
+
+game:BindToClose(function()
+	for _, p in ipairs(Players:GetPlayers()) do
+		saveData(p)
+	end
+end)
+
+--========================== SHOP / SNAPSHOT =============================
+local function snapshot(player)
+	local d = Data[player]
+	local weapons = {}
+	for _, name in ipairs(WEAPON_ORDER) do
+		local W = WEAPONS[name]
+		local st = weaponStats(player, name)
+		local ups = {}
+		for _, key in ipairs(UPGRADE_KEYS) do
+			local lvl = st.levels[key]
+			table.insert(ups, {
+				key = key, label = UPGRADE_LABEL[key], level = lvl, max = MAX_LEVEL,
+				cost = lvl < MAX_LEVEL and upgradeCost(name, lvl) or nil,
+			})
+		end
+		table.insert(weapons, {
+			name = name, price = W.Price, owned = d.Owned[name] == true, desc = W.Desc,
+			stats = string.format("DMG %d x%d  |  %.1f shots/s  |  MAG %d  |  RELOAD %.1fs",
+				math.floor(st.damage + 0.5), W.Pellets, 1 / W.FireRate, st.mag, st.reload),
+			upgrades = ups,
+		})
+	end
+	local items = {}
+	for _, id in ipairs(ITEM_ORDER) do
+		local it = ITEMS[id]
+		local extra = ""
+		if id == "Medkit" then extra = "You have: " .. d.Medkits .. " / " .. CFG.MEDKIT_MAX end
+		table.insert(items, { id = id, name = it.Name, desc = it.Desc, price = it.Price, extra = extra })
+	end
+	return { coins = d.Coins, medkits = d.Medkits, weapons = weapons, items = items }
+end
+
+R.GetShop.OnServerInvoke = function(player)
+	if not Data[player] then return nil end
+	return snapshot(player)
+end
+
+R.Buy.OnServerInvoke = function(player, kind, name, extra)
+	local d = Data[player]
+	if not d then return false, "Still loading...", nil end
+	if type(kind) ~= "string" or type(name) ~= "string" then return false, "Invalid request", snapshot(player) end
+	local now = os.clock()
+	if now - (d.lastBuy or 0) < 0.15 then return false, "Slow down!", snapshot(player) end
+	d.lastBuy = now
+
+	if kind == "Weapon" then
+		local W = WEAPONS[name]
+		if not W then return false, "Unknown weapon", snapshot(player) end
+		if d.Owned[name] then return false, "You already own the " .. name, snapshot(player) end
+		if d.Coins < W.Price then return false, "Not enough coins! Need $" .. (W.Price - d.Coins) .. " more", snapshot(player) end
+		d.Coins = d.Coins - W.Price
+		d.Owned[name] = true
+		d.Dirty = true
+		syncStats(player)
+		if player:GetAttribute("Playing") and isAlive(player) then giveWeapon(player, name) end
+		return true, name .. " purchased!", snapshot(player)
+
+	elseif kind == "Upgrade" then
+		local W = WEAPONS[name]
+		if not W or not d.Owned[name] then return false, "You don't own that weapon", snapshot(player) end
+		if type(extra) ~= "string" or not table.find(UPGRADE_KEYS, extra) then return false, "Invalid upgrade", snapshot(player) end
+		local ups = d.Upgrades[name]
+		if not ups then
+			ups = { Damage = 0, Mag = 0, Reload = 0 }
+			d.Upgrades[name] = ups
+		end
+		local lvl = ups[extra]
+		if lvl >= MAX_LEVEL then return false, "Already max level", snapshot(player) end
+		local cost = upgradeCost(name, lvl)
+		if d.Coins < cost then return false, "Not enough coins! Need $" .. (cost - d.Coins) .. " more", snapshot(player) end
+		d.Coins = d.Coins - cost
+		ups[extra] = lvl + 1
+		d.Dirty = true
+		syncStats(player)
+		refreshTool(player, name)
+		return true, name .. " " .. extra .. " upgraded to Lv " .. (lvl + 1), snapshot(player)
+
+	elseif kind == "Item" then
+		local it = ITEMS[name]
+		if not it then return false, "Unknown item", snapshot(player) end
+		if d.Coins < it.Price then return false, "Not enough coins! Need $" .. (it.Price - d.Coins) .. " more", snapshot(player) end
+
+		if name == "Medkit" then
+			if d.Medkits >= CFG.MEDKIT_MAX then return false, "You can only carry " .. CFG.MEDKIT_MAX .. " medkits", snapshot(player) end
+			d.Coins = d.Coins - it.Price
+			d.Medkits = d.Medkits + 1
+		elseif name == "AmmoRefill" then
+			local any = false
+			for _, wname in ipairs(WEAPON_ORDER) do
+				local tool = findTool(player, wname)
+				if tool then
+					tool:SetAttribute("Reserve", WEAPONS[wname].Reserve)
+					any = true
+				end
+			end
+			if not any then return false, "Spawn in first to refill ammo", snapshot(player) end
+			d.Coins = d.Coins - it.Price
+		elseif name == "DamageBoost" then
+			d.Coins = d.Coins - it.Price
+			player:SetAttribute("DmgBoostUntil", Workspace:GetServerTimeNow() + it.Duration)
+		elseif name == "SpeedBoost" then
+			d.Coins = d.Coins - it.Price
+			player:SetAttribute("SpeedBoostUntil", Workspace:GetServerTimeNow() + it.Duration)
+			applyBoosts(player)
+			task.delay(it.Duration + 1, function() applyBoosts(player) end)
+		end
+		d.Dirty = true
+		syncStats(player)
+		return true, it.Name .. " purchased!", snapshot(player)
+	end
+	return false, "Unknown purchase", snapshot(player)
+end
+
+--========================== REMOTE HANDLERS =============================
+local function debounce(player, key, secs)
+	local now = os.clock()
+	local last = player:GetAttribute(key) or 0
+	if now - last < secs then return false end
+	player:SetAttribute(key, now)
+	return true
+end
+
+R.Play.OnServerEvent:Connect(function(player)
+	if not Data[player] then return end
+	if not debounce(player, "_dPlay", 1) then return end
+	local t0 = os.clock()
+	while not Data[player] or not Data[player].Loaded do
+		if os.clock() - t0 > 6 then break end
+		task.wait(0.2)
+	end
+	if not Data[player] then return end
+	if player:GetAttribute("Playing") and isAlive(player) then return end
+	spawnPlayer(player)
+end)
+
+R.Respawn.OnServerEvent:Connect(function(player)
+	if not Data[player] then return end
+	if not debounce(player, "_dResp", 1) then return end
+	player:SetAttribute("Playing", true)
+	if isAlive(player) then return end
+	local phase = Workspace:GetAttribute("Phase")
+	if phase == "GameOver" then
+		restartRequested = true
+		notify(player, "Restarting...", "info")
+	elseif phase == "Active" then
+		notify(player, "You will respawn at the next break.", "info")
+	else
+		spawnPlayer(player)
+	end
+end)
+
+R.LeaveGame.OnServerEvent:Connect(function(player)
+	player:SetAttribute("Playing", false)
+	player:SetAttribute("Dead", false)
+	local c = player.Character
+	if c then c:Destroy() end
+end)
+
+R.Reload.OnServerEvent:Connect(function(player)
+	local char = player.Character
+	local tool = char and char:FindFirstChildOfClass("Tool")
+	if tool and isAlive(player) then startReload(player, tool) end
+end)
+
+R.UseMedkit.OnServerEvent:Connect(function(player)
+	local d = Data[player]
+	local h = getHumanoid(player)
+	if not d or not h or h.Health <= 0 or not player:GetAttribute("Playing") then return end
+	if not debounce(player, "_dMed", 1.5) then return end
+	if d.Medkits <= 0 then notify(player, "No medkits! Buy one in the shop.", "bad") return end
+	if h.Health >= h.MaxHealth then notify(player, "Health is already full.", "info") return end
+	d.Medkits = d.Medkits - 1
+	d.Dirty = true
+	h.Health = math.min(h.MaxHealth, h.Health + CFG.MEDKIT_HEAL)
+	syncStats(player)
+	notify(player, "+" .. CFG.MEDKIT_HEAL .. " HP (medkit)", "good")
+end)
+
+R.Unstuck.OnServerEvent:Connect(function(player)
+	local char = player.Character
+	local h = getHumanoid(player)
+	if not char or not h or h.Health <= 0 or not player:GetAttribute("Playing") then return end
+	if not debounce(player, "_dUnstuck", 20) then
+		notify(player, "Unstuck is on cooldown.", "bad")
+		return
+	end
+	char:PivotTo(getSpawnCFrame())
+	local ff = Instance.new("ForceField")
+	ff.Parent = char
+	Debris:AddItem(ff, 2)
+	notify(player, "Teleported to the safe plaza.", "info")
+end)
+
+R.Fire.OnServerEvent:Connect(function(player, aimPos)
+	if typeof(aimPos) ~= "Vector3" then return end
+	if aimPos.X ~= aimPos.X or aimPos.Y ~= aimPos.Y or aimPos.Z ~= aimPos.Z then return end
+	if not player:GetAttribute("Playing") then return end
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local head = char and char:FindFirstChild("Head")
+	if not hum or hum.Health <= 0 or not head then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool then return end
+	local wname = tool:GetAttribute("Weapon")
+	local W = WEAPONS[wname]
+	if not W then return end
+	if tool:GetAttribute("Reloading") then return end
+
+	local now = os.clock()
+	if now - (lastFire[tool] or 0) < W.FireRate * 0.8 then return end
+	local ammo = tool:GetAttribute("Ammo") or 0
+	if ammo <= 0 then
+		startReload(player, tool)
+		return
+	end
+	lastFire[tool] = now
+	tool:SetAttribute("Ammo", ammo - 1)
+
+	local origin = head.Position
+	local dir = aimPos - origin
+	if dir.Magnitude < 0.5 then return end
+	dir = dir.Unit
+
+	local exclude = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character then table.insert(exclude, p.Character) end
+	end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = exclude
+	params.IgnoreWater = true
+
+	local st = weaponStats(player, wname)
+	local mult = boostActive(player, "DmgBoostUntil") and 1.5 or 1
+	local endpoints = {}
+	local hits = {}
+	local baseCF = CFrame.lookAt(Vector3.zero, dir)
+
+	for _ = 1, W.Pellets do
+		local d = dir
+		if W.Spread > 0 then
+			local s = math.rad(W.Spread)
+			d = (baseCF * CFrame.Angles((math.random() - 0.5) * 2 * s, (math.random() - 0.5) * 2 * s, 0)).LookVector
+		end
+		local res = Workspace:Raycast(origin, d * W.Range, params)
+		if res then
+			table.insert(endpoints, res.Position)
+			local model = res.Instance:FindFirstAncestorOfClass("Model")
+			if model and CollectionService:HasTag(model, "Zombie") then
+				local zh = model:FindFirstChildOfClass("Humanoid")
+				if zh and zh.Health > 0 then
+					local dmg = st.damage * mult
+					local isHead = res.Instance.Name == "Head"
+					if isHead then dmg = dmg * 2 end
+					if W.Pellets > 1 then
+						dmg = dmg * (1 - 0.55 * math.min(1, res.Distance / W.Range))
+					end
+					local h = hits[model]
+					if not h then
+						h = { dmg = 0, head = false, pos = res.Position }
+						hits[model] = h
+					end
+					h.dmg = h.dmg + dmg
+					h.head = h.head or isHead
+					h.pos = res.Position
+				end
+			end
+		else
+			table.insert(endpoints, origin + d * W.Range)
+		end
+	end
+
+	local anyHit, total, anyKill, anyHead, hitPos = false, 0, false, false, nil
+	for model, h in pairs(hits) do
+		local zh = model:FindFirstChildOfClass("Humanoid")
+		if zh and zh.Health > 0 then
+			model:SetAttribute("Attacker", player.UserId)
+			zh:TakeDamage(h.dmg)
+			anyHit = true
+			total = total + h.dmg
+			anyHead = anyHead or h.head
+			hitPos = h.pos
+			if zh.Health <= 0 then anyKill = true end
+		end
+	end
+	if anyHit then
+		R.HitMarker:FireClient(player, hitPos, math.floor(total + 0.5), anyKill, anyHead)
+	end
+
+	local handle = tool:FindFirstChild("Handle")
+	local muzzle = origin
+	if handle then
+		muzzle = handle.Position + handle.CFrame.LookVector * (W.Len * 0.7)
+	end
+	R.Shot:FireAllClients(muzzle, endpoints, Color3.fromRGB(255, 225, 130))
+
+	if ammo - 1 <= 0 then startReload(player, tool) end
+end)
+
+print("[ZombieServer] Ready. Map built, " .. #ZombieSpawns .. " zombie spawns, " .. #SpawnPads .. " player spawns.")
