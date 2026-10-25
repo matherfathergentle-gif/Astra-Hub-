@@ -1,0 +1,4520 @@
+-- VANTEX HUB for Blox Fruits. Luau, executor environment.
+-- Controls: Right Ctrl hides or shows the window. Tap X twice to detach everything.
+-- Executor functions used: gethui, request, readfile, writefile, isfile, setclipboard, setfpscap,
+-- mouse1click, firetouchinterest, getgenv, getrenv, debug.getupvalues. A missing function only
+-- disables the feature that needs it.
+-- Status: nothing here is runtime-verified. Logs > Diagnose shows what works on your setup.
+
+-- Check for table that is shared between executions.
+if not shared then
+	return warn("No shared, no script.")
+end
+
+-- Detach any previous execution before building anything new.
+if shared.VantexHub then
+	pcall(shared.VantexHub.detach)
+	shared.VantexHub = nil
+end
+
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
+-- Constants.
+local HUB_NAME = "VANTEX HUB"
+local CONFIG_FILE = "VantexHub.json"
+local CONFIG_VERSION = 1
+local LOG_LIMIT = 200
+local LOG_VIEW_LIMIT = 60
+
+local SEA_ONE_ID = 2753915549
+local SEA_TWO_ID = 4442272183
+local SEA_THREE_ID = 7449423635
+
+local DATA_TIMEOUT = 15
+local RESPAWN_TIMEOUT = 30
+local QUEST_VERIFY_TIMEOUT = 3
+local QUEST_MAX_ATTEMPTS = 3
+local QUEST_BLOCK_TIME = 60
+local QUEST_REACH = 20
+local NO_PROGRESS_TIMEOUT = 20
+local NO_DAMAGE_BURSTS = 4
+local NO_TARGET_TIMEOUT = 60
+local BUSY_TIMEOUT = 30
+local MAX_RECOVERIES = 5
+local RETREAT_HEIGHT = 150
+local RETREAT_TIMEOUT = 60
+local RESUME_PERCENT = 90
+local CAMP_RADIUS = 40
+local ATTACK_LEASH = 8
+local ACTION_BURST = 0.6
+local CLICK_INTERVAL = 0.12
+local DIRECT_MOVE_RANGE = 60
+local LOOP_FATAL_ERRORS = 10
+local LOW_HEALTH = "low health"
+
+local ACTION_ACCEPT = "ACCEPT_QUEST"
+local ACTION_ATTACK = "ATTACK"
+
+local V = Vector3.new
+
+-- Quest data copied from public community hubs. Entry layout:
+-- { minLevel, questName, questIndex, mobName, questNpcPosition?, mobCampPosition? }.
+-- Positions can drift between game updates; entries without positions rely on runtime discovery.
+local SEA_ONE_QUESTS = {
+	{ 1, "BanditQuest1", 1, "Bandit", V(1060.94, 16.46, 1547.78), V(1038.55, 41.30, 1576.51) },
+	{ 10, "JungleQuest", 1, "Monkey", V(-1604.12, 36.85, 154.24), V(-1448.14, 50.85, 63.61) },
+	{ 15, "JungleQuest", 2, "Gorilla", V(-1601.66, 36.85, 153.39), V(-1142.65, 40.46, -515.39) },
+	{ 30, "BuggyQuest1", 1, "Pirate", V(-1140.18, 4.75, 3827.41), V(-1201.09, 40.63, 3857.60) },
+	{ 40, "BuggyQuest1", 2, "Brute", V(-1140.18, 4.75, 3827.41), V(-1387.53, 24.59, 4100.96) },
+	{ 60, "DesertQuest", 1, "Desert Bandit", V(896.52, 6.44, 4390.15), V(985.00, 16.11, 4417.91) },
+	{ 75, "DesertQuest", 2, "Desert Officer", V(896.52, 6.44, 4390.15), V(1547.15, 14.45, 4381.80) },
+	{ 90, "SnowQuest", 1, "Snow Bandit", V(1386.81, 87.27, -1298.36), V(1356.30, 105.77, -1328.24) },
+	{ 100, "SnowQuest", 2, "Snowman", V(1386.81, 87.27, -1298.36), V(1218.80, 138.01, -1488.03) },
+	{ 120, "MarineQuest2", 1, "Chief Petty Officer", V(-5035.50, 28.68, 4324.18), V(-4931.16, 65.79, 4121.84) },
+	{ 150, "SkyQuest", 1, "Sky Bandit", V(-4841.83, 717.67, -2623.96), V(-4970.74, 294.54, -2890.11) },
+	{ 175, "SkyQuest", 2, "Dark Master", V(-4841.83, 717.67, -2623.96), V(-5220.59, 430.69, -2278.17) },
+	{ 225, "ColosseumQuest", 1, "Toga Warrior", V(-1576.12, 7.39, -2983.31), V(-1779.98, 44.61, -2736.35) },
+	{ 275, "ColosseumQuest", 2, "Gladiator", V(-1576.12, 7.39, -2983.31), V(-1274.76, 58.19, -3188.16) },
+	{ 300, "MagmaQuest", 1, "Military Soldier", V(-5316.56, 12.24, 8517.30), V(-5363.01, 41.51, 8548.47) },
+	{ 330, "MagmaQuest", 2, "Military Spy", V(-5316.56, 12.24, 8517.30), V(-5787.99, 120.86, 8762.25) },
+	{ 375, "FishmanQuest", 1, "Fishman Warrior", V(61122.56, 18.47, 1568.17), V(61163.85, 5.31, 1819.78) },
+	{ 400, "FishmanQuest", 2, "Fishman Commando", V(61122.56, 18.47, 1568.17), V(61163.85, 5.31, 1819.78) },
+	{ 450, "SkyExp1Quest", 1, "God's Guard", V(-4721.71, 845.28, -1954.20), V(-4716.96, 853.09, -1933.93) },
+	{ 475, "SkyExp1Quest", 2, "Shanda", V(-7863.64, 5545.49, -379.83), V(-7685.12, 5601.05, -443.17) },
+	{ 525, "SkyExp2Quest", 1, "Royal Squad", V(-7902.67, 5635.96, -1411.72), V(-7685.02, 5606.88, -1442.73) },
+	{ 550, "SkyExp2Quest", 2, "Royal Soldier", V(-7902.67, 5635.96, -1411.72), V(-7864.45, 5661.94, -1708.22) },
+	{ 625, "FountainQuest", 1, "Galley Pirate", V(5254.60, 38.50, 4049.70), V(5595.07, 41.50, 3961.47) },
+	{ 650, "FountainQuest", 2, "Galley Captain", V(5254.60, 38.50, 4049.70), V(5658.58, 38.54, 4928.94) },
+}
+
+local SEA_TWO_QUESTS = {
+	{ 700, "Area1Quest", 1, "Raider", V(-424.08, 73.01, 1836.92), V(-737.03, 39.17, 2392.58) },
+	{ 725, "Area1Quest", 2, "Mercenary", V(-424.08, 73.01, 1836.92), V(-973.73, 95.87, 1836.47) },
+	{ 775, "Area2Quest", 1, "Swan Pirate", V(632.70, 73.11, 918.67), V(970.37, 142.65, 1217.37) },
+	{ 875, "MarineQuest3", 1, "Marine Lieutenant", V(-2442.65, 73.05, -3219.12), nil },
+	{ 900, "MarineQuest3", 2, "Marine Captain", V(-2442.65, 73.05, -3219.12), V(-1868.68, 73.00, -3321.66) },
+	{ 950, "ZombieQuest", 1, "Zombie", V(-5492.79, 48.52, -793.71), V(-5634.84, 126.07, -697.67) },
+	{ 975, "ZombieQuest", 2, "Vampire", V(-5492.79, 48.52, -793.71), V(-6030.32, 6.44, -1313.56) },
+	{ 1000, "SnowMountainQuest", 1, "Snow Trooper", V(604.96, 401.46, -5371.69), V(535.89, 401.46, -5329.70) },
+	{ 1050, "SnowMountainQuest", 2, "Winter Warrior", V(604.96, 401.46, -5371.69), V(1223.74, 454.58, -5170.02) },
+	{ 1100, "IceSideQuest", 1, "Lab Subordinate", V(-6060.11, 15.99, -4904.79), V(-5769.20, 37.93, -4468.39) },
+	{ 1125, "IceSideQuest", 2, "Horned Warrior", V(-6060.11, 15.99, -4904.79), V(-6400.86, 24.76, -5818.64) },
+	{ 1175, "FireSideQuest", 1, "Magma Ninja", V(-5431.09, 15.99, -5296.53), V(-5496.66, 58.69, -5929.77) },
+	{ 1200, "FireSideQuest", 2, "Lava Pirate", V(-5431.09, 15.99, -5296.53), V(-5169.72, 34.12, -4669.74) },
+	{ 1350, "FrostQuest", 1, "Arctic Warrior", V(5669.44, 28.21, -6482.60), V(5995.07, 57.32, -6183.47) },
+	{ 1375, "FrostQuest", 2, "Snow Lurker", V(5669.44, 28.21, -6482.60), V(5518.01, 60.56, -6828.81) },
+	{ 1425, "ForgottenQuest", 1, "Sea Soldier", V(-3053.00, 236.88, -10148.19), V(-3030.37, 191.13, -9859.80) },
+	{ 1450, "ForgottenQuest", 2, "Water Fighter", V(-3053.00, 236.88, -10148.19), V(-3436.77, 290.52, -10503.44) },
+}
+
+local SEA_THREE_QUESTS = {
+	{ 1500, "PiratePortQuest", 1, "Pirate Millionaire", V(-290.07, 42.90, 5581.59), V(81.16, 43.76, 5724.70) },
+	{ 1525, "PiratePortQuest", 2, "Pistol Billionaire", V(-290.07, 42.90, 5581.59), V(81.16, 43.76, 5724.70) },
+	{ 1575, "AmazonQuest", 1, "Dragon Crew Warrior", V(5832.84, 51.68, -1101.52), V(6241.99, 51.52, -1243.98) },
+	{ 1600, "AmazonQuest", 2, "Dragon Crew Archer", V(5832.84, 51.68, -1101.52), V(6488.92, 383.38, -110.66) },
+	{ 1625, "AmazonQuest2", 1, "Female Islander", V(5448.86, 601.52, 751.13), V(5825.22, 682.89, 704.58) },
+	{ 1650, "AmazonQuest2", 2, "Giant Islander", V(5448.86, 601.52, 751.13), V(4530.35, 656.76, -131.61) },
+	{ 1700, "MarineTreeIsland", 1, "Marine Commodore", V(2180.54, 27.82, -6741.55), V(2490.08, 190.42, -7160.05) },
+	{ 1725, "MarineTreeIsland", 2, "Marine Rear Admiral", V(2180.54, 27.82, -6741.55), V(3951.39, 229.12, -6912.82) },
+	{ 1775, "DeepForestIsland3", 1, "Fishman Raider", V(-10581.66, 330.87, -8761.19), V(-10322.40, 390.94, -8580.09) },
+	{ 1800, "DeepForestIsland3", 2, "Fishman Captain", V(-10581.66, 330.87, -8761.19), V(-11194.54, 442.03, -8608.81) },
+	{ 1825, "DeepForestIsland", 1, "Forest Pirate", V(-13234.04, 331.49, -7625.40), V(-13225.81, 428.19, -7753.12) },
+	{ 1850, "DeepForestIsland", 2, "Mythological Pirate", V(-13234.04, 331.49, -7625.40), V(-13869.17, 564.95, -7084.41) },
+	{ 1900, "DeepForestIsland2", 1, "Jungle Pirate", V(-12680.38, 389.97, -9902.02), V(-11982.22, 376.33, -10451.42) },
+	{ 1925, "DeepForestIsland2", 2, "Musketeer Pirate", V(-12680.38, 389.97, -9902.02), V(-13282.30, 496.24, -9565.15) },
+	{ 1975, "HauntedQuest1", 1, "Reborn Skeleton", V(-9480.83, 142.13, 5566.07), V(-8817.88, 191.17, 6298.66) },
+	{ 2000, "HauntedQuest1", 2, "Living Zombie", V(-9480.83, 142.13, 5566.07), V(-10125.23, 183.95, 6242.01) },
+	{ 2025, "HauntedQuest2", 1, "Demonic Soul", V(-9516.99, 178.01, 6078.47), V(-9712.03, 204.70, 6193.32) },
+	{ 2050, "HauntedQuest2", 2, "Posessed Mummy", V(-9516.99, 178.01, 6078.47), V(-9545.78, 69.62, 6339.56) },
+	{ 2075, "NutsIslandQuest", 1, "Peanut Scout", V(-2104.36, 38.13, -10194.07), V(-2126.41, 90.56, -10301.96) },
+	{ 2100, "NutsIslandQuest", 2, "Peanut President", V(-2104.36, 38.13, -10194.07), V(-2118.75, 70.30, -10509.32) },
+	{ 2125, "IceCreamIslandQuest", 1, "Ice Cream Chef", V(-820.22, 65.85, -10966.17), V(-685.29, 96.32, -10957.59) },
+	{ 2150, "IceCreamIslandQuest", 2, "Ice Cream Commander", V(-820.22, 65.85, -10966.17), V(-635.74, 143.05, -11335.22) },
+}
+
+local QUEST_LISTS = {
+	[SEA_ONE_ID] = SEA_ONE_QUESTS,
+	[SEA_TWO_ID] = SEA_TWO_QUESTS,
+	[SEA_THREE_ID] = SEA_THREE_QUESTS,
+}
+
+-- Entry layout: { name, position }.
+local ISLANDS = {
+	[SEA_ONE_ID] = {
+		{ "Start Island", V(1071.28, 16.31, 1426.87) },
+		{ "Middle Town", V(-655.82, 7.89, 1436.68) },
+		{ "Jungle", V(-1249.77, 11.89, 341.36) },
+		{ "Pirate Village", V(-1122.35, 4.79, 3855.92) },
+		{ "Desert", V(1094.15, 6.47, 4192.89) },
+		{ "Frozen Village", V(1198.01, 27.01, -1211.73) },
+		{ "Marine Fort", V(-4505.38, 20.69, 4260.56) },
+		{ "Colosseum", V(-1428.35, 7.39, -3014.37) },
+		{ "Sky Island 1", V(-4970.22, 717.71, -2622.35) },
+		{ "Prison", V(4854.16, 5.69, 740.19) },
+		{ "Magma Village", V(-5231.76, 8.62, 8467.88) },
+		{ "Fountain City", V(5132.71, 4.54, 4037.86) },
+	},
+	[SEA_TWO_ID] = {
+		{ "Dock", V(82.95, 18.07, 2834.99) },
+		{ "Kingdom of Rose", V(-394.98, 118.50, 1245.84) },
+		{ "Cafe", V(-385.25, 73.05, 297.39) },
+		{ "Factory", V(430.43, 210.02, -432.50) },
+		{ "Colosseum", V(-1836.58, 44.59, 1360.31) },
+		{ "Green Zone", V(-2372.15, 72.99, -3166.51) },
+		{ "Graveyard", V(-5411.48, 48.82, -721.27) },
+		{ "Snow Mountain", V(511.83, 401.77, -5380.40) },
+		{ "Cold Island", V(-6026.96, 14.75, -5071.96) },
+		{ "Hot Island", V(-5478.39, 15.98, -5246.91) },
+		{ "Ice Castle", V(5400.40, 28.22, -6236.99) },
+		{ "Forgotten Island", V(-3043.32, 238.88, -10191.58) },
+	},
+	[SEA_THREE_ID] = {
+		{ "Port Town", V(-610.31, 57.83, 6436.34) },
+		{ "Hydra Island", V(5229.99, 603.92, 345.15) },
+		{ "Great Tree", V(2174.95, 28.73, -6728.83) },
+		{ "Castle on the Sea", V(-5477.63, 313.79, -2808.46) },
+		{ "Floating Turtle", V(-10919.30, 331.79, -8637.57) },
+		{ "Mansion", V(-12553.81, 332.40, -7621.92) },
+		{ "Haunted Castle", V(-9512.36, 142.13, 5548.85) },
+		{ "Peanut Island", V(-2062.68, 38.13, -10287.75) },
+		{ "Ice Cream Island", V(-840.19, 65.85, -10877.38) },
+	},
+}
+
+-- Services.
+local playersService = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local runService = game:GetService("RunService")
+local tweenService = game:GetService("TweenService")
+local userInputService = game:GetService("UserInputService")
+local virtualUser = game:GetService("VirtualUser")
+local httpService = game:GetService("HttpService")
+local teleportService = game:GetService("TeleportService")
+local collectionService = game:GetService("CollectionService")
+
+local localPlayer = playersService.LocalPlayer
+
+--------------------------------------------------------------------------------
+-- Core utilities.
+--------------------------------------------------------------------------------
+
+---Format a message safely, never throwing on a bad template.
+---@param template string
+---@return string
+local function formatMessage(template, ...)
+	if select("#", ...) == 0 then
+		return tostring(template)
+	end
+
+	local success, result = pcall(string.format, template, ...)
+	return success and result or tostring(template)
+end
+
+---Keep only the first line of an error so logs stay readable.
+---@param message any
+---@return string
+local function firstLine(message)
+	return (string.match(tostring(message), "[^\n]+")) or "unknown error"
+end
+
+-- Tracks connections, instances, tweens, threads and callbacks for one-call cleanup.
+local Maid = {}
+Maid.__index = Maid
+
+---Create a new Maid.
+function Maid.new()
+	return setmetatable({ tasks = {} }, Maid)
+end
+
+---Track an item for cleanup.
+---@param item any
+---@return any
+function Maid:add(item)
+	table.insert(self.tasks, item)
+	return item
+end
+
+---Clean every tracked item. Errors are reported, never swallowed.
+function Maid:clean()
+	local tasks = self.tasks
+	self.tasks = {}
+
+	for _, item in tasks do
+		local success, errorMessage = pcall(function()
+			local itemType = typeof(item)
+
+			if itemType == "RBXScriptConnection" then
+				item:Disconnect()
+			elseif itemType == "Instance" then
+				if item:IsA("Tween") then
+					item:Cancel()
+				end
+
+				item:Destroy()
+			elseif itemType == "function" then
+				item()
+			elseif itemType == "thread" then
+				task.cancel(item)
+			end
+		end)
+
+		if not success then
+			warn("[VANTEX] cleanup failed: " .. firstLine(errorMessage))
+		end
+	end
+end
+
+-- Minimal signal with isolated handlers.
+local Signal = {}
+Signal.__index = Signal
+
+---Create a new Signal.
+function Signal.new()
+	return setmetatable({ handlers = {} }, Signal)
+end
+
+---Connect a handler.
+---@param handler function
+---@return table
+function Signal:connect(handler)
+	local handlers = self.handlers
+	local connection = { handler = handler, connected = true }
+	table.insert(handlers, connection)
+
+	connection.disconnect = function()
+		if not connection.connected then
+			return
+		end
+
+		connection.connected = false
+
+		local index = table.find(handlers, connection)
+		if index then
+			table.remove(handlers, index)
+		end
+	end
+
+	return connection
+end
+
+---Fire every handler. One failing handler never blocks the others.
+function Signal:fire(...)
+	for _, connection in table.clone(self.handlers) do
+		if connection.connected then
+			local success, errorMessage = pcall(connection.handler, ...)
+			if not success then
+				warn("[VANTEX] signal handler failed: " .. firstLine(errorMessage))
+			end
+		end
+	end
+end
+
+-- Detects which executor functions are present instead of assuming them.
+local Dependencies = { cache = {} }
+
+---Check whether the environment exposes a global. Results are cached.
+---@param name string
+---@return boolean
+function Dependencies.has(name)
+	local cached = Dependencies.cache[name]
+	if cached ~= nil then
+		return cached
+	end
+
+	local success, value = pcall(function()
+		return getgenv()[name]
+	end)
+
+	local found = success and value ~= nil
+
+	-- Some executors only expose functions in the running script's environment.
+	if not found then
+		local envSuccess, envValue = pcall(function()
+			return getfenv(1)[name]
+		end)
+
+		found = envSuccess and envValue ~= nil
+	end
+
+	Dependencies.cache[name] = found
+	return found
+end
+
+---Return the names from a list that are missing.
+---@param names table
+---@return table
+function Dependencies.missing(names)
+	local missing = {}
+
+	for _, name in names do
+		if not Dependencies.has(name) then
+			table.insert(missing, name)
+		end
+	end
+
+	return missing
+end
+
+-- Ring-buffer log shared by every module.
+local Logger = {
+	entries = {},
+	changed = Signal.new(),
+	lastNotice = "No notices yet",
+	version = 0,
+}
+
+---Add a log entry. Identical consecutive entries are merged.
+---@param level string
+---@param category string
+---@param message string
+function Logger.add(level, category, message)
+	local previous = Logger.entries[#Logger.entries]
+	Logger.version += 1
+
+	if previous and previous.level == level and previous.category == category and previous.message == message then
+		previous.count += 1
+	else
+		table.insert(Logger.entries, {
+			time = os.date("%H:%M:%S"),
+			level = level,
+			category = category,
+			message = message,
+			count = 1,
+		})
+
+		if #Logger.entries > LOG_LIMIT then
+			table.remove(Logger.entries, 1)
+		end
+	end
+
+	if level ~= "INFO" or category == "Notice" then
+		Logger.lastNotice = string.format("%s [%s] %s", os.date("%H:%M:%S"), level, message)
+	end
+
+	Logger.changed:fire()
+end
+
+---Log an informational entry.
+function Logger.info(category, ...)
+	Logger.add("INFO", category, formatMessage(...))
+end
+
+---Log a warning.
+function Logger.warn(category, ...)
+	Logger.add("WARN", category, formatMessage(...))
+end
+
+---Log an error.
+function Logger.error(category, ...)
+	Logger.add("ERROR", category, formatMessage(...))
+end
+
+---Remove every entry.
+function Logger.clear()
+	table.clear(Logger.entries)
+	Logger.version += 1
+	Logger.changed:fire()
+end
+
+-- User-visible notifications, filtered by the notification setting.
+local Notify = { shown = Signal.new(), mode = "All", lastMessage = nil, lastAt = 0 }
+
+---Push a notification and log it.
+---@param message string
+---@param level string?
+function Notify.push(message, level)
+	level = level or "INFO"
+	Logger.add(level, "Notice", message)
+
+	if Notify.mode == "Off" then
+		return
+	end
+
+	if Notify.mode == "Errors" and level == "INFO" then
+		return
+	end
+
+	-- Skip a toast identical to the previous one so loops cannot spam the screen.
+	local now = os.clock()
+	if message == Notify.lastMessage and now - Notify.lastAt < 2 then
+		return
+	end
+
+	Notify.lastMessage, Notify.lastAt = message, now
+	Notify.shown:fire(message, level)
+end
+
+--------------------------------------------------------------------------------
+-- Configuration with schema validation.
+--------------------------------------------------------------------------------
+
+local SCHEMA = {
+	uiScale = { kind = "number", default = 1, min = 0.7, max = 1.4 },
+	notifications = { kind = "enum", default = "All", options = { "All", "Errors", "Off" } },
+	refreshInterval = { kind = "number", default = 0.5, min = 0.25, max = 2 },
+	autoQuest = { kind = "boolean", default = true },
+	attackDistance = { kind = "number", default = 6, min = 3, max = 12 },
+	moveSpeed = { kind = "number", default = 250, min = 100, max = 350 },
+	retreatPercent = { kind = "number", default = 35, min = 0, max = 60 },
+	inputMethod = { kind = "enum", default = "VirtualUser", options = { "VirtualUser", "Mouse" } },
+	hitMethod = { kind = "enum", default = "Auto", options = { "Auto", "Remote", "Click" } },
+	hitProfile = { kind = "number", default = 1, min = 1, max = 16 },
+	weaponType = { kind = "enum", default = "Melee", options = { "Melee", "Sword" } },
+	statTarget = { kind = "enum", default = "Melee", options = { "Melee", "Defense", "Sword", "Gun", "Demon Fruit" } },
+	fpsCap = { kind = "number", default = 0, min = 0, max = 360 },
+}
+
+local Config = { values = {}, changed = Signal.new(), saveQueued = false }
+
+---Validate a raw value against a field definition. Returns nil when invalid.
+---@param field table
+---@param value any
+---@return any
+local function coerce(field, value)
+	if field.kind == "number" then
+		if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then
+			return nil
+		end
+
+		return math.clamp(value, field.min, field.max)
+	end
+
+	if field.kind == "boolean" then
+		if type(value) ~= "boolean" then
+			return nil
+		end
+
+		return value
+	end
+
+	if field.kind == "enum" and table.find(field.options, value) then
+		return value
+	end
+
+	return nil
+end
+
+---Reset values to defaults without firing change events.
+function Config.reset()
+	for key, field in SCHEMA do
+		Config.values[key] = field.default
+	end
+end
+
+---Read a value.
+---@param key string
+---@return any
+function Config.get(key)
+	return Config.values[key]
+end
+
+---Validate and store a value.
+---@param key string
+---@param value any
+---@return boolean
+function Config.set(key, value)
+	local field = SCHEMA[key]
+	if not field then
+		return false
+	end
+
+	local valid = coerce(field, value)
+	if valid == nil then
+		Logger.warn("Config", "Rejected invalid value for %s", key)
+		return false
+	end
+
+	if Config.values[key] == valid then
+		return true
+	end
+
+	Config.values[key] = valid
+	Config.changed:fire(key, valid)
+	Config.queueSave()
+	return true
+end
+
+---Restore every setting to its default and notify listeners.
+function Config.resetToDefaults()
+	for key, field in SCHEMA do
+		Config.set(key, field.default)
+	end
+
+	Logger.info("Config", "Settings reset to defaults")
+end
+
+---Save after a short delay so rapid slider drags write once.
+function Config.queueSave()
+	if Config.saveQueued then
+		return
+	end
+
+	Config.saveQueued = true
+	task.delay(0.5, Config.save)
+end
+
+---Write the config file.
+---@return boolean
+function Config.save()
+	Config.saveQueued = false
+
+	if not Dependencies.has("writefile") then
+		return false
+	end
+
+	local success, errorMessage = pcall(function()
+		writefile(CONFIG_FILE, httpService:JSONEncode({ version = CONFIG_VERSION, values = Config.values }))
+	end)
+
+	if not success then
+		Logger.error("Config", "Save failed: %s", firstLine(errorMessage))
+	end
+
+	return success
+end
+
+---Load and validate the config file. Invalid fields fall back to defaults.
+---@return boolean
+function Config.load()
+	Config.reset()
+
+	if not (Dependencies.has("isfile") and Dependencies.has("readfile")) then
+		Logger.warn("Config", "File functions unavailable, settings will not persist")
+		return false
+	end
+
+	if not isfile(CONFIG_FILE) then
+		Logger.info("Config", "No saved config, using defaults")
+		return true
+	end
+
+	local success, decoded = pcall(function()
+		return httpService:JSONDecode(readfile(CONFIG_FILE))
+	end)
+
+	if not (success and type(decoded) == "table" and type(decoded.values) == "table") then
+		Logger.warn("Config", "Saved config is malformed and was ignored")
+		return false
+	end
+
+	if decoded.version ~= CONFIG_VERSION then
+		Logger.warn("Config", "Saved config has an unknown version and was ignored")
+		return false
+	end
+
+	local rejected = 0
+
+	for key, field in SCHEMA do
+		local raw = decoded.values[key]
+
+		if raw ~= nil then
+			local valid = coerce(field, raw)
+
+			if valid == nil then
+				rejected += 1
+			else
+				Config.values[key] = valid
+			end
+		end
+	end
+
+	if rejected > 0 then
+		Logger.warn("Config", "%d invalid saved values were replaced by defaults", rejected)
+	end
+
+	return true
+end
+
+--------------------------------------------------------------------------------
+-- Game access: character, progression, remotes.
+--------------------------------------------------------------------------------
+
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- Owns the character lifecycle so no other module caches stale references.
+local Character = {
+	model = nil,
+	humanoid = nil,
+	root = nil,
+	alive = false,
+	changed = Signal.new(),
+	maid = Maid.new(),
+}
+
+---Bind a new character model and wait for its parts.
+---@param model Model
+function Character.bind(model)
+	Character.maid:clean()
+	Character.model = model
+	Character.humanoid = nil
+	Character.root = nil
+	Character.alive = false
+	Character.changed:fire("replaced")
+
+	task.spawn(function()
+		local humanoid = model:WaitForChild("Humanoid", 10)
+		local root = model:WaitForChild("HumanoidRootPart", 10)
+
+		-- A newer character may have replaced this one while we waited.
+		if Character.model ~= model then
+			return
+		end
+
+		if not (humanoid and root) then
+			Logger.warn("Character", "Humanoid or HumanoidRootPart missing")
+			return
+		end
+
+		Character.humanoid = humanoid
+		Character.root = root
+		Character.alive = humanoid.Health > 0
+
+		Character.maid:add(humanoid.Died:Connect(function()
+			Character.alive = false
+			Character.changed:fire("died")
+		end))
+
+		Character.maid:add(model.AncestryChanged:Connect(function(_, parent)
+			if not parent then
+				Character.alive = false
+				Character.changed:fire("removed")
+			end
+		end))
+
+		Character.changed:fire("ready")
+	end)
+end
+
+---Return model, humanoid and root when the character is usable.
+---@return Model?, Humanoid?, BasePart?
+function Character.get()
+	local humanoid, root = Character.humanoid, Character.root
+
+	if not (Character.alive and humanoid and root and root.Parent and humanoid.Health > 0) then
+		return nil, nil, nil
+	end
+
+	return Character.model, humanoid, root
+end
+
+---Current health as a percentage, or nil without a character.
+---@return number?
+function Character.healthPercent()
+	local _, humanoid = Character.get()
+	if not humanoid or humanoid.MaxHealth <= 0 then
+		return nil
+	end
+
+	return humanoid.Health / humanoid.MaxHealth * 100
+end
+
+---Start listening for characters.
+function Character.init()
+	Character.connection = localPlayer.CharacterAdded:Connect(Character.bind)
+
+	if localPlayer.Character then
+		Character.bind(localPlayer.Character)
+	end
+end
+
+---Disconnect everything.
+function Character.destroy()
+	if Character.connection then
+		Character.connection:Disconnect()
+		Character.connection = nil
+	end
+
+	Character.maid:clean()
+end
+
+-- Reads progression values defensively.
+local Progression = {}
+
+---@param name string
+---@return number?
+local function readDataValue(name)
+	local data = localPlayer:FindFirstChild("Data")
+	local value = data and data:FindFirstChild(name)
+
+	if value and type(value.Value) == "number" then
+		return value.Value
+	end
+
+	return nil
+end
+
+---@return number?
+function Progression.level()
+	return readDataValue("Level")
+end
+
+---@return number?
+function Progression.points()
+	return readDataValue("Points")
+end
+
+-- Wraps the game's CommF_ remote. Its calls are undocumented and may change.
+local Remotes = { commF = nil, lastWarning = 0 }
+
+---Find CommF_ without throwing.
+---@return RemoteFunction?
+function Remotes.getCommF()
+	if Remotes.commF and Remotes.commF.Parent then
+		return Remotes.commF
+	end
+
+	local folder = replicatedStorage:FindFirstChild("Remotes")
+	local remote = folder and folder:FindFirstChild("CommF_")
+
+	if remote and remote:IsA("RemoteFunction") then
+		Remotes.commF = remote
+		return remote
+	end
+
+	if os.clock() - Remotes.lastWarning > 30 then
+		Remotes.lastWarning = os.clock()
+		Logger.warn("Remotes", "ReplicatedStorage.Remotes.CommF_ not found")
+	end
+
+	return nil
+end
+
+---Invoke CommF_ safely.
+---@return boolean, any
+function Remotes.invoke(...)
+	local commF = Remotes.getCommF()
+	if not commF then
+		return false, "CommF_ unavailable"
+	end
+
+	local success, result = pcall(commF.InvokeServer, commF, ...)
+	if not success then
+		return false, firstLine(result)
+	end
+
+	return true, result
+end
+
+--------------------------------------------------------------------------------
+-- Movement: one controller, one owner at a time.
+--------------------------------------------------------------------------------
+
+local Movement = {
+	owner = nil,
+	tween = nil,
+	token = 0,
+	originals = {},
+	noclipConnection = nil,
+}
+
+---Enable or disable temporary noclip. Original collision values are restored.
+---@param enabled boolean
+function Movement.setNoclip(enabled)
+	if enabled then
+		if Movement.noclipConnection then
+			return
+		end
+
+		local model = Character.get()
+		if not model then
+			return
+		end
+
+		local parts = {}
+
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				Movement.originals[descendant] = descendant.CanCollide
+				table.insert(parts, descendant)
+			end
+		end
+
+		Movement.noclipConnection = runService.Stepped:Connect(function()
+			for _, part in parts do
+				part.CanCollide = false
+			end
+
+			local _, _, root = Character.get()
+			if root then
+				root.AssemblyLinearVelocity = Vector3.zero
+			end
+		end)
+
+		return
+	end
+
+	if Movement.noclipConnection then
+		Movement.noclipConnection:Disconnect()
+		Movement.noclipConnection = nil
+	end
+
+	for part, original in Movement.originals do
+		if part.Parent then
+			part.CanCollide = original
+		end
+	end
+
+	table.clear(Movement.originals)
+end
+
+---Cancel the current movement. Pass an owner to cancel only that owner's movement.
+---@param owner string?
+function Movement.cancel(owner)
+	if owner and Movement.owner ~= owner then
+		return
+	end
+
+	Movement.token += 1
+
+	if Movement.tween then
+		Movement.tween:Cancel()
+		Movement.tween = nil
+	end
+
+	Movement.owner = nil
+	Movement.setNoclip(false)
+end
+
+---Place the character instantly if nobody else owns movement.
+---@param owner string
+---@param targetCFrame CFrame
+---@return boolean
+function Movement.place(owner, targetCFrame)
+	if Movement.owner and Movement.owner ~= owner then
+		return false
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return false
+	end
+
+	root.CFrame = targetCFrame
+	root.AssemblyLinearVelocity = Vector3.zero
+	return true
+end
+
+---Move to a CFrame. Returns true on arrival, or false plus a reason.
+---@param owner string
+---@param targetCFrame CFrame
+---@param shouldAbort function?
+---@return boolean, string?
+function Movement.moveTo(owner, targetCFrame, shouldAbort)
+	if Movement.owner and Movement.owner ~= owner then
+		return false, "busy"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return false, "character lost"
+	end
+
+	local distance = (root.Position - targetCFrame.Position).Magnitude
+	if distance <= DIRECT_MOVE_RANGE then
+		if Movement.place(owner, targetCFrame) then
+			return true, nil
+		end
+
+		return false, "character lost"
+	end
+
+	Movement.token += 1
+	local token = Movement.token
+	Movement.owner = owner
+
+	local duration = distance / Config.get("moveSpeed")
+	local tween = tweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCFrame })
+
+	Movement.tween = tween
+	Movement.setNoclip(true)
+	tween:Play()
+
+	local startedAt = os.clock()
+	local arrived, reason = true, nil
+
+	while os.clock() - startedAt < duration do
+		task.wait()
+
+		if Movement.token ~= token then
+			arrived, reason = false, "cancelled"
+			break
+		end
+
+		if shouldAbort and shouldAbort() then
+			arrived, reason = false, "aborted"
+			break
+		end
+
+		if not Character.get() then
+			arrived, reason = false, "character lost"
+			break
+		end
+	end
+
+	-- Only clean up if a newer move has not taken over.
+	if Movement.token == token then
+		tween:Cancel()
+		Movement.tween = nil
+		Movement.owner = nil
+		Movement.setNoclip(false)
+
+		if arrived then
+			Movement.place(owner, targetCFrame)
+		end
+	end
+
+	return arrived, reason
+end
+
+--------------------------------------------------------------------------------
+-- Quests, enemies and combat helpers.
+--------------------------------------------------------------------------------
+
+local Quests = {}
+
+---Check every quest list for malformed entries.
+---@return number
+function Quests.validate()
+	local problems = 0
+
+	for placeId, list in QUEST_LISTS do
+		local previous = 0
+
+		for index, entry in list do
+			local valid = type(entry[1]) == "number"
+				and type(entry[2]) == "string"
+				and type(entry[3]) == "number"
+				and type(entry[4]) == "string"
+				and entry[1] > previous
+				and (entry[5] == nil or typeof(entry[5]) == "Vector3")
+				and (entry[6] == nil or typeof(entry[6]) == "Vector3")
+
+			if not valid then
+				problems += 1
+				Logger.error("Quests", "Invalid quest entry %d in place %d", index, placeId)
+			end
+
+			previous = type(entry[1]) == "number" and entry[1] or previous
+		end
+	end
+
+	return problems
+end
+
+---Select the highest quest unlocked at a level.
+---@param level number
+---@return table?, string?
+function Quests.select(level)
+	local list = QUEST_LISTS[game.PlaceId]
+	if not list then
+		return nil, "No quest data for this place"
+	end
+
+	local picked = nil
+
+	for _, entry in list do
+		if level >= entry[1] then
+			picked = entry
+		end
+	end
+
+	if not picked then
+		return nil, "No quest unlocked at level " .. tostring(level)
+	end
+
+	return {
+		name = picked[2],
+		index = picked[3],
+		mob = picked[4],
+		npcPosition = picked[5],
+		campPosition = picked[6],
+		minLevel = picked[1],
+	}, nil
+end
+
+---Read the quest UI. Returns a table or nil plus a reason.
+---@return table?, string?
+function Quests.readActive()
+	local main = playerGui:FindFirstChild("Main")
+	local questGui = main and main:FindFirstChild("Quest")
+
+	if not questGui then
+		return nil, "Quest UI not found"
+	end
+
+	local container = questGui:FindFirstChild("Container")
+	local holder = container and container:FindFirstChild("QuestTitle")
+	local label = holder and holder:FindFirstChild("Title")
+	local title = label and label:IsA("TextLabel") and label.Text or ""
+
+	return { visible = questGui.Visible, title = title }, nil
+end
+
+---Check whether the active quest targets this quest's mob.
+---@param quest table
+---@return boolean, string?
+function Quests.isActiveFor(quest)
+	local info, reason = Quests.readActive()
+	if not info then
+		return false, reason
+	end
+
+	return info.visible and string.find(info.title, quest.mob, 1, true) ~= nil, nil
+end
+
+local Enemies = { warned = false }
+
+---@return Folder?
+function Enemies.folder()
+	local folder = workspace:FindFirstChild("Enemies")
+
+	if not folder and not Enemies.warned then
+		Enemies.warned = true
+		Logger.warn("Enemies", "workspace.Enemies not found, is this a supported place?")
+	end
+
+	return folder
+end
+
+---Match an enemy name, allowing older "[Lv. N]" suffixes.
+---@param name string
+---@param mobName string
+---@return boolean
+function Enemies.matches(name, mobName)
+	return name == mobName or string.sub(name, 1, #mobName + 2) == mobName .. " ["
+end
+
+---@param model Instance?
+---@return boolean
+function Enemies.isAlive(model)
+	if not (model and model.Parent) then
+		return false
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") ~= nil
+end
+
+---Find the nearest living enemy, optionally restricted to one mob name.
+---@param mobName string?
+---@param origin Vector3
+---@return Model?, number?
+function Enemies.nearest(mobName, origin)
+	local folder = Enemies.folder()
+	if not folder then
+		return nil, nil
+	end
+
+	local closest, closestDistance = nil, math.huge
+
+	for _, enemy in folder:GetChildren() do
+		if mobName and not Enemies.matches(enemy.Name, mobName) then
+			continue
+		end
+
+		if not Enemies.isAlive(enemy) then
+			continue
+		end
+
+		local distance = (enemy.HumanoidRootPart.Position - origin).Magnitude
+		if distance < closestDistance then
+			closest, closestDistance = enemy, distance
+		end
+	end
+
+	return closest, closestDistance
+end
+
+---Pick where mobs of a quest spawn: live spawn points first, saved data second.
+---@param quest table
+---@param origin Vector3
+---@return Vector3?
+function Enemies.campPosition(quest, origin)
+	local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+	local spawns = worldOrigin and worldOrigin:FindFirstChild("EnemySpawns")
+	local best, bestDistance = nil, math.huge
+
+	if spawns then
+		for _, spawnPart in spawns:GetChildren() do
+			if spawnPart:IsA("BasePart") and Enemies.matches(spawnPart.Name, quest.mob) then
+				local distance = (spawnPart.Position - origin).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = spawnPart.Position, distance
+				end
+			end
+		end
+	end
+
+	return best or quest.campPosition
+end
+
+---A position behind the enemy at attack distance, facing it.
+---@param enemy Model
+---@param distance number
+---@return CFrame
+function Enemies.attackCFrame(enemy, distance)
+	local root = enemy.HumanoidRootPart
+	local position = root.Position - root.CFrame.LookVector * distance + Vector3.new(0, 2, 0)
+	return CFrame.lookAt(position, root.Position)
+end
+
+local Combat = {
+	warned = {},
+	remotes = {},
+	lastScan = -10,
+	sessionValue = nil,
+	sessionStamp = -10,
+	profileIndex = nil,
+	verifiedIndex = nil,
+	noDamageBursts = 0,
+	failedProfiles = 0,
+}
+
+-- Hit profiles. Remote profiles mirror the argument shapes public community scripts use for the
+-- game's combat remotes. The farm verifies damage and rotates when a profile does not register.
+local HIT_PARTS = { "RightLowerLeg", "Head", "HumanoidRootPart" }
+local HIT_PROFILES = {}
+
+for _, partName in HIT_PARTS do
+	table.insert(HIT_PROFILES, { kind = "remote", part = partName, third = "nil", name = partName .. " / nil" })
+	table.insert(HIT_PROFILES, { kind = "remote", part = partName, third = "table", name = partName .. " / {}" })
+end
+
+table.insert(HIT_PROFILES, { kind = "click", name = "Click input" })
+
+---@param key string
+---@param message string
+function Combat.warnOnce(key, message)
+	if not Combat.warned[key] then
+		Combat.warned[key] = true
+		Logger.warn("Combat", "%s", message)
+	end
+end
+
+---Equip a tool of the configured type. Returns true when one is held.
+---@return boolean
+function Combat.equipWeapon()
+	local model, humanoid = Character.get()
+	if not (model and humanoid) then
+		return false
+	end
+
+	local toolTip = Config.get("weaponType")
+
+	for _, child in model:GetChildren() do
+		if child:IsA("Tool") and child.ToolTip == toolTip then
+			return true
+		end
+	end
+
+	local backpack = localPlayer:FindFirstChild("Backpack")
+	if not backpack then
+		return false
+	end
+
+	for _, tool in backpack:GetChildren() do
+		if tool:IsA("Tool") and tool.ToolTip == toolTip then
+			humanoid:EquipTool(tool)
+			task.wait(0.15)
+			return tool.Parent == model
+		end
+	end
+
+	return false
+end
+
+---Send one primary click using the configured input method.
+function Combat.click()
+	if Config.get("inputMethod") == "Mouse" then
+		if Dependencies.has("mouse1click") and (not Dependencies.has("isrbxactive") or isrbxactive()) then
+			mouse1click()
+			return
+		end
+
+		Combat.warnOnce("mouse", "Mouse input needs mouse1click and a focused window, using VirtualUser")
+	end
+
+	local camera = workspace.CurrentCamera
+	local cameraCFrame = camera and camera.CFrame or CFrame.new()
+	local position = Vector2.new(851, 158)
+
+	virtualUser:CaptureController()
+	virtualUser:Button1Down(position, cameraCFrame)
+	task.wait(0.03)
+	virtualUser:Button1Up(position, cameraCFrame)
+end
+
+---Find a combat remote in the net module, falling back to a scan of ReplicatedStorage.
+---@param remoteName string
+---@return RemoteEvent?
+function Combat.findRemote(remoteName)
+	local modules = replicatedStorage:FindFirstChild("Modules")
+	local net = modules and modules:FindFirstChild("Net")
+	local direct = net and net:FindFirstChild(remoteName)
+
+	if direct and direct:IsA("RemoteEvent") then
+		return direct
+	end
+
+	local shortName = string.match(remoteName, "[^/]+$")
+
+	for _, descendant in replicatedStorage:GetDescendants() do
+		if descendant:IsA("RemoteEvent") and (descendant.Name == remoteName or descendant.Name == shortName) then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+---Resolve both combat remotes. Scans are throttled so a missing remote cannot cause lag.
+---@param force boolean?
+---@return RemoteEvent?, RemoteEvent?
+function Combat.resolveRemotes(force)
+	local remotes = Combat.remotes
+	local attackReady = remotes.attack and remotes.attack.Parent
+	local hitReady = remotes.hit and remotes.hit.Parent
+
+	if not (attackReady and hitReady) and (force or os.clock() - Combat.lastScan > 5) then
+		Combat.lastScan = os.clock()
+
+		if not attackReady then
+			remotes.attack = Combat.findRemote("RE/RegisterAttack")
+		end
+
+		if not hitReady then
+			remotes.hit = Combat.findRemote("RE/RegisterHit")
+		end
+	end
+
+	return remotes.attack, remotes.hit
+end
+
+---Build the combat session value the game's own hit sender uses. Never logged.
+---@return string?
+function Combat.sessionId()
+	if Combat.sessionValue and os.clock() - Combat.sessionStamp < 5 then
+		return Combat.sessionValue
+	end
+
+	local success, result = pcall(function()
+		local sendHits = getrenv()._G.SendHitsToServer
+		if type(sendHits) ~= "function" then
+			error("_G.SendHitsToServer is not a function")
+		end
+
+		local upvalues = debug.getupvalues(sendHits)
+		local combatThread = nil
+
+		for _, upvalue in upvalues do
+			if type(upvalue) == "thread" then
+				combatThread = upvalue
+				break
+			end
+		end
+
+		combatThread = combatThread or upvalues[1]
+		if combatThread == nil then
+			error("combat thread upvalue not found")
+		end
+
+		return string.sub(tostring(localPlayer.UserId), 2, 4) .. string.sub(tostring(combatThread), 11, 15)
+	end)
+
+	Combat.sessionStamp = os.clock()
+
+	if success then
+		Combat.sessionValue = result
+		return result
+	end
+
+	Combat.sessionValue = nil
+	Combat.warnOnce("session", "Hit session value unavailable: " .. firstLine(result))
+	return nil
+end
+
+---Whether the configured hit method allows a profile.
+---@param index number
+---@return boolean
+function Combat.profileAllowed(index)
+	local profile = HIT_PROFILES[index]
+	local method = Config.get("hitMethod")
+
+	if method == "Remote" then
+		return profile.kind == "remote"
+	end
+
+	if method == "Click" then
+		return profile.kind == "click"
+	end
+
+	return true
+end
+
+---The profile currently in use, choosing a valid one when needed.
+---@return table
+function Combat.currentProfile()
+	if Combat.profileIndex and Combat.profileAllowed(Combat.profileIndex) then
+		return HIT_PROFILES[Combat.profileIndex]
+	end
+
+	local saved = Config.get("hitProfile")
+
+	if HIT_PROFILES[saved] and Combat.profileAllowed(saved) then
+		Combat.profileIndex = saved
+	else
+		for index = 1, #HIT_PROFILES do
+			if Combat.profileAllowed(index) then
+				Combat.profileIndex = index
+				break
+			end
+		end
+	end
+
+	Combat.noDamageBursts = 0
+	return HIT_PROFILES[Combat.profileIndex]
+end
+
+---Send one attack with the current profile. Returns true or false plus a reason.
+---@param target Model
+---@return boolean, string?
+function Combat.attack(target)
+	local profile = Combat.currentProfile()
+
+	if profile.kind == "click" then
+		Combat.click()
+		return true, nil
+	end
+
+	local attackRemote, hitRemote = Combat.resolveRemotes()
+
+	if not (attackRemote and hitRemote) then
+		if Config.get("hitMethod") == "Auto" then
+			Combat.warnOnce("noremotes", "Combat remotes not found, falling back to click input")
+			Combat.profileIndex = #HIT_PROFILES
+			Combat.click()
+			return true, nil
+		end
+
+		return false, "combat remotes not found"
+	end
+
+	local part = target:FindFirstChild(profile.part) or target:FindFirstChild("HumanoidRootPart")
+	if not part then
+		return false, "target has no hit part"
+	end
+
+	local success, errorMessage = pcall(function()
+		attackRemote:FireServer(0.5)
+		task.wait()
+
+		if profile.third == "table" then
+			hitRemote:FireServer(part, {}, {}, Combat.sessionId())
+		else
+			hitRemote:FireServer(part, {}, nil, Combat.sessionId())
+		end
+	end)
+
+	if not success then
+		return false, firstLine(errorMessage)
+	end
+
+	return true, nil
+end
+
+---Record that the current profile dealt damage.
+function Combat.reportDamage()
+	Combat.noDamageBursts = 0
+	Combat.failedProfiles = 0
+
+	if Combat.verifiedIndex ~= Combat.profileIndex and Combat.profileIndex then
+		Combat.verifiedIndex = Combat.profileIndex
+		Logger.info("Combat", "Hit profile works: %s", HIT_PROFILES[Combat.profileIndex].name)
+		Config.set("hitProfile", Combat.profileIndex)
+	end
+end
+
+---Record a burst without damage. Returns "waiting", "advanced" or "exhausted".
+---@return string
+function Combat.reportNoDamage()
+	Combat.currentProfile()
+	Combat.noDamageBursts += 1
+
+	-- A profile that worked before gets more patience, mobs can be briefly invulnerable.
+	local patience = Combat.verifiedIndex == Combat.profileIndex and NO_DAMAGE_BURSTS * 3 or NO_DAMAGE_BURSTS
+	if Combat.noDamageBursts < patience then
+		return "waiting"
+	end
+
+	Combat.noDamageBursts = 0
+	Combat.failedProfiles += 1
+
+	local allowed, nextIndex = 0, nil
+	local count = #HIT_PROFILES
+
+	for index = 1, count do
+		if Combat.profileAllowed(index) then
+			allowed += 1
+		end
+	end
+
+	for step = 1, count do
+		local candidate = (Combat.profileIndex + step - 1) % count + 1
+
+		if candidate ~= Combat.profileIndex and Combat.profileAllowed(candidate) then
+			nextIndex = candidate
+			break
+		end
+	end
+
+	if Combat.failedProfiles >= allowed or not nextIndex then
+		Combat.failedProfiles = 0
+		return "exhausted"
+	end
+
+	Combat.profileIndex = nextIndex
+	Logger.warn("Combat", "No damage registered, trying hit profile: %s", HIT_PROFILES[nextIndex].name)
+	return "advanced"
+end
+
+---One-line combat status for the dashboard.
+---@return string
+function Combat.statusText()
+	local profile = Combat.currentProfile()
+	local attackRemote, hitRemote = Combat.resolveRemotes()
+	local verified = Combat.verifiedIndex == Combat.profileIndex and "verified" or "not verified yet"
+	local remotes = (attackRemote and hitRemote) and "remotes found" or "remotes missing"
+
+	return string.format("%s  -  %s  -  %s", profile.name, verified, remotes)
+end
+
+--------------------------------------------------------------------------------
+-- Auto Farm state machine.
+--
+-- Allowed transitions (anything else is logged as an error and sent to RECOVERING):
+--   INITIALIZING        -> CHECKING_CHARACTER, RECOVERING, PAUSED, STOPPED
+--   CHECKING_CHARACTER  -> SELECTING_QUEST, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   SELECTING_QUEST     -> VERIFYING_QUEST, FINDING_TARGET, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   VERIFYING_QUEST     -> FINDING_TARGET, NAVIGATING, EXECUTING_ACTION, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   FINDING_TARGET      -> SELECTING_QUEST, NAVIGATING, EXECUTING_ACTION, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   NAVIGATING          -> VERIFYING_QUEST, FINDING_TARGET, EXECUTING_ACTION, CHECKING_CHARACTER,
+--                          WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   EXECUTING_ACTION    -> VERIFYING_QUEST, VERIFYING_PROGRESS, NAVIGATING, WAITING_FOR_RESPAWN,
+--                          RECOVERING, PAUSED, STOPPED
+--   VERIFYING_PROGRESS  -> EXECUTING_ACTION, FINDING_TARGET, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   WAITING_FOR_RESPAWN -> CHECKING_CHARACTER, RECOVERING, PAUSED, STOPPED
+--   RECOVERING          -> CHECKING_CHARACTER, PAUSED, STOPPED
+--   PAUSED              -> CHECKING_CHARACTER, STOPPED
+--   STOPPED             -> INITIALIZING
+--------------------------------------------------------------------------------
+
+local STATES = {
+	INITIALIZING = "INITIALIZING",
+	CHECKING_CHARACTER = "CHECKING_CHARACTER",
+	SELECTING_QUEST = "SELECTING_QUEST",
+	VERIFYING_QUEST = "VERIFYING_QUEST",
+	FINDING_TARGET = "FINDING_TARGET",
+	NAVIGATING = "NAVIGATING",
+	EXECUTING_ACTION = "EXECUTING_ACTION",
+	VERIFYING_PROGRESS = "VERIFYING_PROGRESS",
+	WAITING_FOR_RESPAWN = "WAITING_FOR_RESPAWN",
+	RECOVERING = "RECOVERING",
+	PAUSED = "PAUSED",
+	STOPPED = "STOPPED",
+}
+
+local TRANSITION_LISTS = {
+	INITIALIZING = { "CHECKING_CHARACTER", "RECOVERING", "PAUSED", "STOPPED" },
+	CHECKING_CHARACTER = { "SELECTING_QUEST", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	SELECTING_QUEST = { "VERIFYING_QUEST", "FINDING_TARGET", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	VERIFYING_QUEST = { "FINDING_TARGET", "NAVIGATING", "EXECUTING_ACTION", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	FINDING_TARGET = { "SELECTING_QUEST", "NAVIGATING", "EXECUTING_ACTION", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	NAVIGATING = { "VERIFYING_QUEST", "FINDING_TARGET", "EXECUTING_ACTION", "CHECKING_CHARACTER", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	EXECUTING_ACTION = { "VERIFYING_QUEST", "VERIFYING_PROGRESS", "NAVIGATING", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	VERIFYING_PROGRESS = { "EXECUTING_ACTION", "FINDING_TARGET", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	WAITING_FOR_RESPAWN = { "CHECKING_CHARACTER", "RECOVERING", "PAUSED", "STOPPED" },
+	RECOVERING = { "CHECKING_CHARACTER", "PAUSED", "STOPPED" },
+	PAUSED = { "CHECKING_CHARACTER", "STOPPED" },
+	STOPPED = { "INITIALIZING" },
+}
+
+local ALLOWED = {}
+
+for from, targets in TRANSITION_LISTS do
+	ALLOWED[from] = {}
+
+	for _, target in targets do
+		ALLOWED[from][target] = true
+	end
+end
+
+-- Routine combat-loop edges are not logged, they would flood the log every second.
+local QUIET_EDGES = {
+	["EXECUTING_ACTION>VERIFYING_PROGRESS"] = true,
+	["VERIFYING_PROGRESS>EXECUTING_ACTION"] = true,
+	["FINDING_TARGET>EXECUTING_ACTION"] = true,
+	["VERIFYING_PROGRESS>FINDING_TARGET"] = true,
+}
+
+local Farm = {
+	state = STATES.STOPPED,
+	reason = "not started",
+	stateSince = os.clock(),
+	running = false,
+	paused = false,
+	token = 0,
+	context = {},
+	stats = { kills = 0, startedAt = os.clock() },
+	changed = Signal.new(),
+}
+
+local HANDLERS = {}
+
+---@return table
+local function newContext()
+	return {
+		quest = nil,
+		target = nil,
+		action = ACTION_ATTACK,
+		navGoal = nil,
+		navNext = nil,
+		navLabel = nil,
+		questAttempts = 0,
+		questBlockedUntil = 0,
+		lastProgressAt = os.clock(),
+		healthBefore = 0,
+		recoveries = 0,
+		retreatCooldownUntil = 0,
+		noTargetSince = nil,
+		busySince = nil,
+		equipFailures = 0,
+		warnedQuestUi = false,
+	}
+end
+
+---True when this run was stopped or replaced.
+---@param token number
+---@return boolean
+function Farm.cancelled(token)
+	return Farm.token ~= token or not Farm.running
+end
+
+---Sleep in small steps so cancellation is honoured. Returns false when cancelled.
+---@param seconds number
+---@param token number
+---@return boolean
+function Farm.sleep(seconds, token)
+	local deadline = os.clock() + seconds
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return false
+		end
+
+		task.wait(0.1)
+	end
+
+	return not Farm.cancelled(token)
+end
+
+---Move to a new state, enforcing the documented transition table.
+---@param newState string
+---@param reason string?
+function Farm.transition(newState, reason)
+	local old = Farm.state
+
+	if not (ALLOWED[old] and ALLOWED[old][newState]) then
+		Logger.error("State", "Invalid transition %s -> %s (%s)", old, newState, tostring(reason))
+		newState = ALLOWED[old] and ALLOWED[old][STATES.RECOVERING] and STATES.RECOVERING or STATES.STOPPED
+		reason = "invalid transition"
+	end
+
+	Farm.state = newState
+	Farm.reason = reason or ""
+	Farm.stateSince = os.clock()
+
+	if not QUIET_EDGES[old .. ">" .. newState] then
+		Logger.info("State", "%s -> %s (%s)", old, newState, Farm.reason)
+	end
+
+	Farm.changed:fire(newState, Farm.reason)
+end
+
+---Start the controller.
+---@return boolean
+function Farm.start()
+	if Farm.running then
+		return false
+	end
+
+	Farm.running = true
+	Farm.paused = false
+	Farm.token += 1
+	Farm.context = newContext()
+	Farm.stats = { kills = 0, startedAt = os.clock() }
+	Farm.transition(STATES.INITIALIZING, "start requested")
+	task.spawn(Farm.run, Farm.token)
+	return true
+end
+
+---Stop the controller and release everything it holds.
+---@param reason string?
+function Farm.stop(reason)
+	if not Farm.running then
+		return
+	end
+
+	Farm.running = false
+	Farm.paused = false
+	Farm.token += 1
+	Movement.cancel()
+	Farm.transition(STATES.STOPPED, reason or "stopped by user")
+end
+
+---Stop because of an unrecoverable problem.
+---@param reason string
+function Farm.fail(reason)
+	Notify.push("Auto Farm stopped: " .. reason, "ERROR")
+	Farm.stop(reason)
+end
+
+---@return boolean
+function Farm.pause()
+	if not Farm.running or Farm.paused then
+		return false
+	end
+
+	Farm.paused = true
+	Movement.cancel("farm")
+	return true
+end
+
+---@return boolean
+function Farm.resume()
+	if not Farm.running or not Farm.paused then
+		return false
+	end
+
+	Farm.paused = false
+	return true
+end
+
+---Main loop. One handler runs per iteration.
+---@param token number
+function Farm.run(token)
+	while not Farm.cancelled(token) do
+		if Farm.paused and Farm.state ~= STATES.PAUSED then
+			Farm.transition(STATES.PAUSED, "pause requested")
+		end
+
+		local handler = HANDLERS[Farm.state]
+		if not handler then
+			Farm.fail("No handler for state " .. tostring(Farm.state))
+			break
+		end
+
+		local success, nextState, reason = xpcall(handler, function(errorMessage)
+			return debug.traceback(tostring(errorMessage), 2)
+		end, Farm.context, token)
+
+		if Farm.cancelled(token) then
+			break
+		end
+
+		if not success then
+			Logger.error("Farm", "Handler %s failed: %s", Farm.state, firstLine(nextState))
+			nextState, reason = STATES.RECOVERING, "handler error"
+		end
+
+		if nextState and nextState ~= Farm.state then
+			Farm.transition(nextState, reason)
+		end
+
+		task.wait()
+	end
+end
+
+---Human-readable description of the current task.
+---@return string
+function Farm.taskText()
+	local state, context = Farm.state, Farm.context
+
+	if state == STATES.STOPPED then
+		return "Idle"
+	end
+
+	if state == STATES.PAUSED then
+		return "Paused"
+	end
+
+	if state == STATES.NAVIGATING then
+		return "Travelling to " .. tostring(context.navLabel or "destination")
+	end
+
+	if state == STATES.EXECUTING_ACTION then
+		if context.action == ACTION_ACCEPT then
+			return "Accepting quest"
+		end
+
+		return "Attacking " .. (context.target and context.target.Name or "target")
+	end
+
+	if state == STATES.FINDING_TARGET then
+		if context.noTargetSince then
+			return "Waiting for mobs to spawn"
+		end
+
+		return "Looking for " .. (context.quest and context.quest.mob or "a target")
+	end
+
+	return string.lower((string.gsub(state, "_", " ")))
+end
+
+---Kills per minute for this session.
+---@return number
+function Farm.killsPerMinute()
+	local minutes = (os.clock() - Farm.stats.startedAt) / 60
+	return Farm.stats.kills / math.max(minutes, 1 / 60)
+end
+
+---Move up and wait for health to recover. Anchoring is always restored.
+---@param token number
+---@return boolean
+local function retreat(token)
+	local _, _, root = Character.get()
+	if not root then
+		return false
+	end
+
+	local safeCFrame = CFrame.new(root.Position + Vector3.new(0, RETREAT_HEIGHT, 0))
+	local arrived = Movement.moveTo("farm", safeCFrame, function()
+		return Farm.cancelled(token) or Farm.paused
+	end)
+
+	local _, _, current = Character.get()
+	if not (arrived and current) then
+		return false
+	end
+
+	local wasAnchored = current.Anchored
+	current.Anchored = true
+
+	local startedAt = os.clock()
+	local recovered = false
+
+	while not Farm.cancelled(token) and not Farm.paused and os.clock() - startedAt < RETREAT_TIMEOUT do
+		local percent = Character.healthPercent()
+		if not percent then
+			break
+		end
+
+		if percent >= RESUME_PERCENT then
+			recovered = true
+			break
+		end
+
+		task.wait(0.5)
+	end
+
+	current.Anchored = wasAnchored
+	return recovered
+end
+
+HANDLERS[STATES.INITIALIZING] = function(_, token)
+	local deadline = os.clock() + DATA_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		if Progression.level() then
+			return STATES.CHECKING_CHARACTER, "progression data ready"
+		end
+
+		task.wait(0.25)
+	end
+
+	return STATES.RECOVERING, "Data.Level not found"
+end
+
+HANDLERS[STATES.CHECKING_CHARACTER] = function(context)
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "no live character"
+	end
+
+	local percent = Character.healthPercent()
+	local threshold = Config.get("retreatPercent")
+
+	if threshold > 0 and percent and percent < threshold and os.clock() >= context.retreatCooldownUntil then
+		return STATES.RECOVERING, LOW_HEALTH
+	end
+
+	return STATES.SELECTING_QUEST, "character ready"
+end
+
+HANDLERS[STATES.SELECTING_QUEST] = function(context)
+	local level = Progression.level()
+	if not level then
+		return STATES.RECOVERING, "level unreadable"
+	end
+
+	local quest, problem = Quests.select(level)
+	if not quest then
+		Farm.fail(problem or "no quest available")
+		return nil
+	end
+
+	if not context.quest or context.quest.name ~= quest.name or context.quest.index ~= quest.index then
+		Logger.info("Farm", "Selected %s #%d for %s (level %d)", quest.name, quest.index, quest.mob, level)
+		context.questAttempts = 0
+	end
+
+	context.quest = quest
+	context.target = nil
+
+	if Config.get("autoQuest") and os.clock() >= context.questBlockedUntil then
+		return STATES.VERIFYING_QUEST, "checking quest"
+	end
+
+	return STATES.FINDING_TARGET, "farming without quest"
+end
+
+HANDLERS[STATES.VERIFYING_QUEST] = function(context)
+	local quest = context.quest
+	local active, problem = Quests.isActiveFor(quest)
+
+	if active then
+		context.questAttempts = 0
+		context.recoveries = 0
+		return STATES.FINDING_TARGET, "quest active"
+	end
+
+	if problem then
+		if not context.warnedQuestUi then
+			context.warnedQuestUi = true
+			Logger.warn("Quests", "%s, farming without quest for %ds", problem, QUEST_BLOCK_TIME)
+		end
+
+		context.questBlockedUntil = os.clock() + QUEST_BLOCK_TIME
+		return STATES.FINDING_TARGET, "cannot verify quests"
+	end
+
+	if context.questAttempts >= QUEST_MAX_ATTEMPTS then
+		context.questBlockedUntil = os.clock() + QUEST_BLOCK_TIME
+		context.questAttempts = 0
+		Notify.push(string.format("Quest %s was not accepted, farming without it", quest.name), "WARN")
+		return STATES.FINDING_TARGET, "quest not accepted"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	if quest.npcPosition and (root.Position - quest.npcPosition).Magnitude > QUEST_REACH then
+		context.navGoal = CFrame.new(quest.npcPosition + Vector3.new(0, 3, 0))
+		context.navNext = STATES.VERIFYING_QUEST
+		context.navLabel = "quest NPC"
+		return STATES.NAVIGATING, "walking to quest NPC"
+	end
+
+	context.action = ACTION_ACCEPT
+	return STATES.EXECUTING_ACTION, "accepting quest"
+end
+
+HANDLERS[STATES.FINDING_TARGET] = function(context, token)
+	local quest = context.quest
+
+	if Config.get("autoQuest") and os.clock() >= context.questBlockedUntil then
+		local active = Quests.isActiveFor(quest)
+		if not active then
+			return STATES.SELECTING_QUEST, "quest not active"
+		end
+	end
+
+	local level = Progression.level()
+	local latest = level and Quests.select(level)
+	if latest and (latest.name ~= quest.name or latest.index ~= quest.index) then
+		return STATES.SELECTING_QUEST, "level unlocked a new quest"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	local target = Enemies.nearest(quest.mob, root.Position)
+	if target then
+		context.target = target
+		context.action = ACTION_ATTACK
+		context.lastProgressAt = os.clock()
+		context.noTargetSince = nil
+		context.equipFailures = 0
+		return STATES.EXECUTING_ACTION, "target " .. target.Name
+	end
+
+	context.noTargetSince = context.noTargetSince or os.clock()
+	if os.clock() - context.noTargetSince > NO_TARGET_TIMEOUT then
+		context.noTargetSince = nil
+		return STATES.RECOVERING, "no target found for " .. NO_TARGET_TIMEOUT .. "s"
+	end
+
+	local camp = Enemies.campPosition(quest, root.Position)
+	if camp and (root.Position - camp).Magnitude > CAMP_RADIUS then
+		context.navGoal = CFrame.new(camp + Vector3.new(0, 4, 0))
+		context.navNext = STATES.FINDING_TARGET
+		context.navLabel = quest.mob .. " camp"
+		return STATES.NAVIGATING, "heading to camp"
+	end
+
+	Farm.sleep(0.5, token)
+	return nil
+end
+
+HANDLERS[STATES.NAVIGATING] = function(context, token)
+	local goal = context.navGoal
+	if not goal then
+		return STATES.CHECKING_CHARACTER, "no navigation goal"
+	end
+
+	local arrived, why = Movement.moveTo("farm", goal, function()
+		return Farm.cancelled(token) or Farm.paused
+	end)
+
+	if Farm.cancelled(token) then
+		return nil
+	end
+
+	if arrived then
+		context.busySince = nil
+		context.navGoal = nil
+		return context.navNext or STATES.CHECKING_CHARACTER, "arrived"
+	end
+
+	if why == "busy" then
+		context.busySince = context.busySince or os.clock()
+
+		if os.clock() - context.busySince > BUSY_TIMEOUT then
+			context.busySince = nil
+			return STATES.RECOVERING, "movement stayed busy"
+		end
+
+		Farm.sleep(0.5, token)
+		return nil
+	end
+
+	context.busySince = nil
+
+	if why == "character lost" then
+		return STATES.WAITING_FOR_RESPAWN, why
+	end
+
+	if why == "aborted" or why == "cancelled" then
+		return STATES.CHECKING_CHARACTER, "navigation interrupted"
+	end
+
+	return STATES.RECOVERING, "navigation failed: " .. tostring(why)
+end
+
+---Wait for the quest UI to confirm acceptance.
+---@param quest table
+---@param token number
+---@return boolean
+local function waitForQuest(quest, token)
+	local deadline = os.clock() + QUEST_VERIFY_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return false
+		end
+
+		if Quests.isActiveFor(quest) then
+			return true
+		end
+
+		task.wait(0.2)
+	end
+
+	return false
+end
+
+HANDLERS[STATES.EXECUTING_ACTION] = function(context, token)
+	if Movement.owner and Movement.owner ~= "farm" then
+		Farm.sleep(0.25, token)
+		return nil
+	end
+
+	if context.action == ACTION_ACCEPT then
+		context.questAttempts += 1
+
+		-- A different active quest blocks acceptance, so drop it first.
+		local activeInfo = Quests.readActive()
+		if activeInfo and activeInfo.visible then
+			Remotes.invoke("AbandonQuest")
+		end
+
+		local success, result = Remotes.invoke("StartQuest", context.quest.name, context.quest.index)
+		if not success then
+			Logger.error("Quests", "StartQuest failed: %s", tostring(result))
+		end
+
+		waitForQuest(context.quest, token)
+		return STATES.VERIFYING_QUEST, "verifying acceptance"
+	end
+
+	local target = context.target
+	if not Enemies.isAlive(target) then
+		return STATES.VERIFYING_PROGRESS, "target gone"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	local distance = Config.get("attackDistance")
+	local targetRoot = target.HumanoidRootPart
+
+	if (root.Position - targetRoot.Position).Magnitude > distance + ATTACK_LEASH then
+		context.navGoal = Enemies.attackCFrame(target, distance)
+		context.navNext = STATES.EXECUTING_ACTION
+		context.navLabel = target.Name
+		return STATES.NAVIGATING, "moving into range"
+	end
+
+	if not Combat.equipWeapon() then
+		context.equipFailures += 1
+
+		if context.equipFailures >= 3 then
+			context.equipFailures = 0
+			return STATES.RECOVERING, "no " .. Config.get("weaponType") .. " tool could be equipped"
+		end
+
+		Farm.sleep(0.5, token)
+		return nil
+	end
+
+	context.equipFailures = 0
+
+	local targetHumanoid = target:FindFirstChildOfClass("Humanoid")
+	context.healthBefore = targetHumanoid and targetHumanoid.Health or 0
+
+	local endsAt = os.clock() + ACTION_BURST
+
+	while os.clock() < endsAt do
+		if Farm.cancelled(token) or Farm.paused then
+			return nil
+		end
+
+		if not Enemies.isAlive(target) then
+			break
+		end
+
+		local _, _, currentRoot = Character.get()
+		if not currentRoot then
+			return STATES.WAITING_FOR_RESPAWN, "character lost"
+		end
+
+		local flat = Vector3.new(targetRoot.Position.X, currentRoot.Position.Y, targetRoot.Position.Z)
+		if (flat - currentRoot.Position).Magnitude > 0.1 then
+			Movement.place("farm", CFrame.lookAt(currentRoot.Position, flat))
+		end
+
+		local fired, attackProblem = Combat.attack(target)
+		if not fired then
+			Logger.error("Combat", "Attack failed: %s", tostring(attackProblem))
+			Farm.sleep(1, token)
+			break
+		end
+
+		task.wait(CLICK_INTERVAL)
+	end
+
+	return STATES.VERIFYING_PROGRESS, "burst complete"
+end
+
+HANDLERS[STATES.VERIFYING_PROGRESS] = function(context)
+	local target = context.target
+
+	if not Enemies.isAlive(target) then
+		Combat.reportDamage()
+		Farm.stats.kills += 1
+		context.target = nil
+		context.recoveries = 0
+		context.lastProgressAt = os.clock()
+		Logger.info("Farm", "Target defeated (%d this session)", Farm.stats.kills)
+		return STATES.FINDING_TARGET, "target defeated"
+	end
+
+	local threshold = Config.get("retreatPercent")
+	local percent = Character.healthPercent()
+	if threshold > 0 and percent and percent < threshold and os.clock() >= context.retreatCooldownUntil then
+		return STATES.RECOVERING, LOW_HEALTH
+	end
+
+	local humanoid = target:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.Health < context.healthBefore then
+		Combat.reportDamage()
+		context.lastProgressAt = os.clock()
+		context.recoveries = 0
+		return STATES.EXECUTING_ACTION, "damage observed"
+	end
+
+	local verdict = Combat.reportNoDamage()
+
+	if verdict == "advanced" then
+		context.lastProgressAt = os.clock()
+	elseif verdict == "exhausted" then
+		Logger.error("Combat", "No hit profile registered damage. Open Logs and press Diagnose.")
+		return STATES.RECOVERING, "no hit profile registered damage"
+	end
+
+	if os.clock() - context.lastProgressAt > NO_PROGRESS_TIMEOUT then
+		Logger.warn("Combat", "No damage in %ds. Check the weapon type and attack distance.", NO_PROGRESS_TIMEOUT)
+		return STATES.RECOVERING, "no damage observed"
+	end
+
+	return STATES.EXECUTING_ACTION, "no damage yet, retrying"
+end
+
+HANDLERS[STATES.WAITING_FOR_RESPAWN] = function(context, token)
+	Movement.cancel()
+	context.target = nil
+
+	local deadline = os.clock() + RESPAWN_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		if Character.get() then
+			return STATES.CHECKING_CHARACTER, "character ready"
+		end
+
+		task.wait(0.25)
+	end
+
+	return STATES.RECOVERING, "respawn timed out"
+end
+
+HANDLERS[STATES.RECOVERING] = function(context, token)
+	Movement.cancel()
+	context.target = nil
+
+	if Farm.reason == LOW_HEALTH then
+		local recovered = retreat(token)
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		-- Do not retreat again straight away if health never recovered.
+		context.retreatCooldownUntil = os.clock() + (recovered and 10 or 120)
+
+		return STATES.CHECKING_CHARACTER, recovered and "health restored" or "retreat ended"
+	end
+
+	context.recoveries += 1
+
+	if context.recoveries > MAX_RECOVERIES then
+		Farm.fail(string.format("%d consecutive failures (last: %s)", MAX_RECOVERIES, Farm.reason))
+		return nil
+	end
+
+	local delay = math.min(2 * context.recoveries, 10)
+	Logger.warn("Farm", "Recovering %d/%d: %s. Retrying in %ds", context.recoveries, MAX_RECOVERIES, Farm.reason, delay)
+
+	if not Farm.sleep(delay, token) then
+		return nil
+	end
+
+	return STATES.CHECKING_CHARACTER, "retry after recovery"
+end
+
+HANDLERS[STATES.PAUSED] = function(_, token)
+	Farm.sleep(0.2, token)
+
+	if not Farm.paused then
+		return STATES.CHECKING_CHARACTER, "resumed"
+	end
+
+	return nil
+end
+
+HANDLERS[STATES.STOPPED] = function()
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Auxiliary features.
+--------------------------------------------------------------------------------
+
+local COMPAT_LABELS = {
+	VERIFIED = "IMPLEMENTED AND VERIFIED",
+	UNTESTED = "IMPLEMENTED BUT UNTESTED",
+	PARTIAL = "PARTIALLY IMPLEMENTED",
+	UNSUPPORTED = "UNSUPPORTED",
+	DEPENDENCIES = "REQUIRES ADDITIONAL DEPENDENCIES",
+}
+
+local COMPAT_BADGES = {
+	VERIFIED = "VERIFIED",
+	UNTESTED = "UNTESTED",
+	PARTIAL = "PARTIAL",
+	UNSUPPORTED = "UNSUPPORTED",
+	DEPENDENCIES = "NEEDS DEPS",
+}
+
+local Features = { list = {}, byKey = {}, changed = Signal.new() }
+
+-- Shared status values written by loops and read by the dashboard.
+local Status = {
+	tracking = "Target tracking is off",
+	chests = "Chest tracker is off",
+	raid = "Raid status is off",
+	hop = "Idle",
+}
+
+---Run a callback on an interval. Returns a stop function, repeated failures stop the loop.
+---@param name string
+---@param interval number
+---@param callback function
+---@param onFatal function?
+---@return function
+local function startLoop(name, interval, callback, onFatal)
+	local active = true
+
+	task.spawn(function()
+		local failures = 0
+
+		while active do
+			local success, errorMessage = xpcall(callback, function(message)
+				return tostring(message)
+			end)
+
+			if success then
+				failures = 0
+			else
+				failures += 1
+				Logger.error(name, "%s", firstLine(errorMessage))
+
+				if failures >= LOOP_FATAL_ERRORS then
+					active = false
+
+					if onFatal then
+						onFatal(name .. " stopped after repeated errors")
+					end
+
+					break
+				end
+			end
+
+			task.wait(interval)
+		end
+	end)
+
+	return function()
+		active = false
+	end
+end
+
+---@param definition table
+local function defineFeature(definition)
+	definition.maid = Maid.new()
+	definition.enabled = false
+	table.insert(Features.list, definition)
+	Features.byKey[definition.key] = definition
+end
+
+---@param feature table
+---@return boolean
+function Features.isEnabled(feature)
+	if feature.isEnabled then
+		return feature.isEnabled()
+	end
+
+	return feature.enabled
+end
+
+---Report whether a feature can run right now.
+---@param feature table
+---@return boolean, string?
+function Features.available(feature)
+	if feature.compat == "UNSUPPORTED" then
+		return false, feature.note or "Unsupported"
+	end
+
+	if feature.requires then
+		local missing = Dependencies.missing(feature.requires)
+		if #missing > 0 then
+			return false, "Missing executor functions: " .. table.concat(missing, ", ")
+		end
+	end
+
+	return true, nil
+end
+
+---Effective compatibility key, accounting for missing dependencies.
+---@param feature table
+---@return string
+function Features.effectiveCompat(feature)
+	if feature.compat ~= "UNSUPPORTED" and feature.requires and #Dependencies.missing(feature.requires) > 0 then
+		return "DEPENDENCIES"
+	end
+
+	return feature.compat
+end
+
+---@param key string
+---@return string
+function Features.status(key)
+	local feature = Features.byKey[key]
+	if not (feature and Features.isEnabled(feature)) then
+		return "OFF"
+	end
+
+	if key == "AutoFarm" and Farm.paused then
+		return "PAUSED"
+	end
+
+	return "ON"
+end
+
+---Enable or disable a feature through one code path.
+---@param key string
+---@param enabled boolean
+---@return boolean
+function Features.setEnabled(key, enabled)
+	local feature = Features.byKey[key]
+	if not feature then
+		return false
+	end
+
+	if Features.isEnabled(feature) == enabled then
+		return true
+	end
+
+	if enabled then
+		local available, reason = Features.available(feature)
+		if not available then
+			Notify.push(feature.name .. " unavailable: " .. tostring(reason), "WARN")
+			return false
+		end
+
+		feature.enabled = true
+		local success, errorMessage = pcall(feature.start, feature)
+
+		if not success then
+			feature.enabled = false
+			feature.maid:clean()
+			Logger.error("Features", "%s failed to start: %s", feature.name, firstLine(errorMessage))
+			Features.changed:fire(key)
+			return false
+		end
+	else
+		feature.enabled = false
+
+		local success, errorMessage = pcall(feature.stop, feature)
+		if not success then
+			Logger.error("Features", "%s failed to stop cleanly: %s", feature.name, firstLine(errorMessage))
+		end
+
+		feature.maid:clean()
+	end
+
+	Logger.info("Features", "%s %s", feature.name, enabled and "enabled" or "disabled")
+	Features.changed:fire(key)
+	return true
+end
+
+---Disable every feature.
+function Features.stopAll()
+	for _, feature in Features.list do
+		if feature.kind == "toggle" and Features.isEnabled(feature) then
+			Features.setEnabled(feature.key, false)
+		end
+	end
+end
+
+---@param feature table
+---@return function
+local function fatalHandler(feature)
+	return function(message)
+		Notify.push(feature.name .. ": " .. message, "ERROR")
+		task.defer(Features.setEnabled, feature.key, false)
+	end
+end
+
+defineFeature({
+	key = "AutoFarm",
+	name = "Auto Farm",
+	category = "Combat",
+	description = "Quests, finds and fights mobs for your level",
+	compat = "UNTESTED",
+	kind = "toggle",
+	isEnabled = function()
+		return Farm.running
+	end,
+	start = function()
+		if not Farm.start() then
+			error("Auto Farm is already running")
+		end
+	end,
+	stop = function()
+		Farm.stop("stopped by user")
+	end,
+})
+
+defineFeature({
+	key = "TargetTracking",
+	name = "Target Tracking",
+	category = "Combat",
+	description = "Shows the nearest enemy, its health and distance",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("TargetTracking", 0.5, function()
+			local _, _, root = Character.get()
+			if not root then
+				Status.tracking = "No character"
+				return
+			end
+
+			local enemy, distance = Enemies.nearest(nil, root.Position)
+			if not enemy then
+				Status.tracking = "No enemies nearby"
+				return
+			end
+
+			local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+			local health = humanoid and math.floor(humanoid.Health) or 0
+			local maxHealth = humanoid and math.floor(humanoid.MaxHealth) or 0
+			Status.tracking = string.format("%s  %d/%d HP  %d studs", enemy.Name, health, maxHealth, math.floor(distance))
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.tracking = "Target tracking is off"
+	end,
+})
+
+defineFeature({
+	key = "AutoHaki",
+	name = "Auto Haki",
+	category = "Combat",
+	description = "Keeps Buso Haki active through the game's CommF_ remote",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("AutoHaki", 3, function()
+			local model = Character.get()
+			if not model or model:FindFirstChild("HasBuso") then
+				return
+			end
+
+			local success, result = Remotes.invoke("Buso")
+			if not success then
+				error("Buso call failed: " .. tostring(result))
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "AutoStats",
+	name = "Auto Stats",
+	category = "Progression",
+	description = "Spends stat points on the selected stat (Settings)",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		local stalled = 0
+
+		feature.maid:add(startLoop("AutoStats", 2, function()
+			local points = Progression.points()
+			if not points or points <= 0 then
+				stalled = 0
+				return
+			end
+
+			local success, result = Remotes.invoke("AddPoint", Config.get("statTarget"), points)
+			if not success then
+				error("AddPoint failed: " .. tostring(result))
+			end
+
+			task.wait(0.5)
+
+			-- Confirm the points actually went down before trusting the call.
+			local after = Progression.points()
+			if after and after >= points then
+				stalled += 1
+
+				if stalled >= 3 then
+					error("Stat points did not change after 3 attempts")
+				end
+			else
+				stalled = 0
+				Logger.info("Stats", "Spent %d points on %s", points, Config.get("statTarget"))
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "FruitCollect",
+	name = "Fruit Collector",
+	category = "Loot",
+	description = "Travels to dropped fruits and picks them up",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("FruitCollect", 1, function()
+			if Movement.owner then
+				return
+			end
+
+			local _, _, root = Character.get()
+			if not root then
+				return
+			end
+
+			for _, object in workspace:GetChildren() do
+				if not (object:IsA("Tool") and string.find(object.Name, "Fruit", 1, true)) then
+					continue
+				end
+
+				local handle = object:FindFirstChild("Handle")
+				if not handle then
+					continue
+				end
+
+				local arrived = Movement.moveTo("fruit", handle.CFrame + Vector3.new(0, 2, 0))
+				if arrived and Dependencies.has("firetouchinterest") then
+					firetouchinterest(root, handle, 0)
+					firetouchinterest(root, handle, 1)
+				end
+
+				task.wait(1)
+
+				if not object.Parent or object.Parent ~= workspace then
+					Notify.push("Collected " .. object.Name, "INFO")
+				else
+					Logger.warn("Fruit", "%s is still on the ground after reaching it", object.Name)
+				end
+
+				return
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Movement.cancel("fruit")
+	end,
+})
+
+local visitedChests = setmetatable({}, { __mode = "k" })
+
+defineFeature({
+	key = "ChestTracker",
+	name = "Chest Tracker",
+	category = "Loot",
+	description = "Counts tagged chests and collects the nearest one",
+	compat = "PARTIAL",
+	note = "Depends on the _ChestTagged collection tag",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("ChestTracker", 1, function()
+			local chests = collectionService:GetTagged("_ChestTagged")
+			Status.chests = string.format("%d chests tracked", #chests)
+
+			if Movement.owner then
+				return
+			end
+
+			local _, _, root = Character.get()
+			if not root then
+				return
+			end
+
+			local best, bestDistance = nil, math.huge
+
+			for _, chest in chests do
+				local last = visitedChests[chest]
+				if last and os.clock() - last < 60 then
+					continue
+				end
+
+				local distance = (chest:GetPivot().Position - root.Position).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = chest, distance
+				end
+			end
+
+			if not best then
+				return
+			end
+
+			visitedChests[best] = os.clock()
+			Movement.moveTo("chest", best:GetPivot() + Vector3.new(0, 2, 0))
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.chests = "Chest tracker is off"
+		Movement.cancel("chest")
+	end,
+})
+
+defineFeature({
+	key = "RaidStatus",
+	name = "Raid Status",
+	category = "Events",
+	description = "Reads the raid timer from the game's HUD",
+	compat = "PARTIAL",
+	note = "Only the timer is read; bosses and waves are not tracked",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("RaidStatus", 1, function()
+			local main = playerGui:FindFirstChild("Main")
+			local hud = main and main:FindFirstChild("TopHUDList")
+			local timer = (hud and hud:FindFirstChild("RaidTimer")) or (main and main:FindFirstChild("Timer"))
+
+			if timer and timer:IsA("TextLabel") and timer.Visible then
+				Status.raid = "Raid timer: " .. timer.Text
+			else
+				Status.raid = "No raid timer visible"
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.raid = "Raid status is off"
+	end,
+})
+
+defineFeature({
+	key = "SeaEvents",
+	name = "Sea Event Status",
+	category = "Events",
+	description = "Sea event tracking",
+	compat = "UNSUPPORTED",
+	note = "No verified data source for sea events",
+	kind = "toggle",
+	start = function() end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "BossStatus",
+	name = "Boss Status",
+	category = "Events",
+	description = "Boss spawn tracking",
+	compat = "UNSUPPORTED",
+	note = "Boss names and spawn data are not verified",
+	kind = "toggle",
+	start = function() end,
+	stop = function() end,
+})
+
+local Navigation = { selected = 1, busy = false }
+
+---@return table
+function Navigation.list()
+	return ISLANDS[game.PlaceId] or {}
+end
+
+---@return string
+function Navigation.selectedName()
+	local entry = Navigation.list()[Navigation.selected]
+	return entry and entry[1] or "No destinations"
+end
+
+function Navigation.cycle()
+	local list = Navigation.list()
+	if #list == 0 then
+		return
+	end
+
+	Navigation.selected = Navigation.selected % #list + 1
+end
+
+function Navigation.go()
+	local entry = Navigation.list()[Navigation.selected]
+	if not entry then
+		Notify.push("No navigation data for this place", "WARN")
+		return
+	end
+
+	if Navigation.busy then
+		Notify.push("Already travelling", "WARN")
+		return
+	end
+
+	Navigation.busy = true
+
+	task.spawn(function()
+		local arrived, reason = Movement.moveTo("nav", CFrame.new(entry[2] + Vector3.new(0, 5, 0)))
+		Navigation.busy = false
+
+		if arrived then
+			Notify.push("Arrived at " .. entry[1], "INFO")
+		else
+			Notify.push(string.format("Travel to %s failed: %s", entry[1], tostring(reason)), "WARN")
+		end
+	end)
+end
+
+function Navigation.cancel()
+	Movement.cancel("nav")
+	Navigation.busy = false
+end
+
+defineFeature({
+	key = "Navigation",
+	name = "Navigation",
+	category = "Travel",
+	description = "Travel to saved island positions",
+	compat = "UNTESTED",
+	kind = "navigation",
+	start = function() end,
+	stop = function() end,
+	isEnabled = function()
+		return Navigation.busy
+	end,
+})
+
+local ServerHop = { busy = false }
+
+---Pick a server with free slots and teleport using documented Roblox APIs.
+function ServerHop.perform()
+	local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+	local response = request({ Url = url, Method = "GET" })
+
+	if not (response and response.Success) then
+		error("server list request failed")
+	end
+
+	local decoded = httpService:JSONDecode(response.Body)
+	if type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		error("unexpected server list format")
+	end
+
+	local best = nil
+
+	for _, server in decoded.data do
+		if type(server) == "table"
+			and server.id ~= game.JobId
+			and type(server.playing) == "number"
+			and type(server.maxPlayers) == "number"
+			and server.playing < server.maxPlayers - 1
+			and (not best or server.playing < best.playing)
+		then
+			best = server
+		end
+	end
+
+	if not best then
+		error("no joinable server found")
+	end
+
+	Notify.push(string.format("Joining a server with %d players", best.playing), "INFO")
+	teleportService:TeleportToPlaceInstance(game.PlaceId, best.id, localPlayer)
+end
+
+function ServerHop.run()
+	if ServerHop.busy then
+		return
+	end
+
+	ServerHop.busy = true
+	Status.hop = "Searching for a server"
+
+	task.spawn(function()
+		local success, errorMessage = pcall(ServerHop.perform)
+		ServerHop.busy = false
+		Status.hop = "Idle"
+
+		if not success then
+			Notify.push("Server hop failed: " .. firstLine(errorMessage), "ERROR")
+		end
+	end)
+end
+
+defineFeature({
+	key = "ServerHop",
+	name = "Server Hop",
+	category = "Travel",
+	description = "Teleports to another public server",
+	compat = "PARTIAL",
+	note = "The Third Sea may refuse client-started teleports",
+	requires = { "request" },
+	kind = "action",
+	run = ServerHop.run,
+	start = function() end,
+	stop = function() end,
+	isEnabled = function()
+		return ServerHop.busy
+	end,
+})
+
+--------------------------------------------------------------------------------
+-- Diagnostics.
+--------------------------------------------------------------------------------
+
+local Diagnostics = {}
+
+---Run every dependency and state check, report it in the log, and copy the report.
+---@return number, number
+function Diagnostics.run()
+	local lines = {}
+	local passed, failed = 0, 0
+
+	---@param name string
+	---@param ok boolean
+	---@param detail string?
+	local function check(name, ok, detail)
+		local text = detail and string.format("%s: %s", name, detail) or name
+		table.insert(lines, (ok and "PASS " or "FAIL ") .. text)
+
+		if ok then
+			passed += 1
+			Logger.info("Diag", "PASS %s", text)
+		else
+			failed += 1
+			Logger.warn("Diag", "FAIL %s", text)
+		end
+	end
+
+	check("Supported place", QUEST_LISTS[game.PlaceId] ~= nil, "PlaceId " .. tostring(game.PlaceId))
+
+	local model, _, root = Character.get()
+	check("Live character", root ~= nil)
+
+	local level = Progression.level()
+	check("Data.Level readable", level ~= nil, level and ("level " .. tostring(level)) or "Player.Data.Level missing")
+
+	local questInfo, questProblem = Quests.readActive()
+	local questDetail = questProblem
+
+	if questInfo then
+		questDetail = questInfo.visible and "quest visible" or "no active quest"
+	end
+
+	check("Quest UI found", questInfo ~= nil, questDetail)
+
+	local quest = level and Quests.select(level) or nil
+	check("Quest selected", quest ~= nil, quest and (quest.name .. " -> " .. quest.mob) or "none for this level or place")
+	check("workspace.Enemies", workspace:FindFirstChild("Enemies") ~= nil)
+
+	if quest and root then
+		local enemy, distance = Enemies.nearest(quest.mob, root.Position)
+		local detail = "none loaded, travel to the camp first"
+
+		if enemy then
+			detail = string.format("%d studs away", math.floor(distance))
+		end
+
+		check("Quest mob loaded", enemy ~= nil, detail)
+	end
+
+	check("CommF_ remote", Remotes.getCommF() ~= nil)
+
+	local toolType = Config.get("weaponType")
+	local hasTool = false
+	local containers = {}
+	local backpack = localPlayer:FindFirstChild("Backpack")
+
+	if model then
+		table.insert(containers, model)
+	end
+
+	if backpack then
+		table.insert(containers, backpack)
+	end
+
+	for _, container in containers do
+		for _, child in container:GetChildren() do
+			if child:IsA("Tool") and child.ToolTip == toolType then
+				hasTool = true
+			end
+		end
+	end
+
+	check(toolType .. " tool available", hasTool, not hasTool and ("equip or buy a " .. toolType .. " weapon") or nil)
+
+	local attackRemote, hitRemote = Combat.resolveRemotes(true)
+	check("RegisterAttack remote", attackRemote ~= nil)
+	check("RegisterHit remote", hitRemote ~= nil)
+	check("Hit session value", Combat.sessionId() ~= nil, "needed by the remote hit profiles")
+
+	local profile = Combat.currentProfile()
+	local verified = Combat.verifiedIndex == Combat.profileIndex and "verified" or "not verified yet"
+	check("Hit profile", true, profile.name .. " (" .. verified .. ")")
+
+	local missing = Dependencies.missing({ "request", "writefile", "readfile", "isfile", "setclipboard", "gethui", "getgenv", "getrenv" })
+	check("Executor functions", #missing == 0, #missing > 0 and ("missing " .. table.concat(missing, ", ")) or nil)
+	check("debug.getupvalues", type(debug.getupvalues) == "function")
+
+	if Dependencies.has("setclipboard") then
+		pcall(setclipboard, table.concat(lines, "\n"))
+	end
+
+	Notify.push(string.format("Diagnostics: %d passed, %d failed", passed, failed), failed > 0 and "WARN" or "INFO")
+	return passed, failed
+end
+
+--------------------------------------------------------------------------------
+-- GUI.
+--------------------------------------------------------------------------------
+
+local THEME = {
+	obsidian = Color3.fromRGB(9, 9, 15),
+	panel = Color3.fromRGB(16, 16, 26),
+	element = Color3.fromRGB(23, 23, 37),
+	hover = Color3.fromRGB(32, 32, 52),
+	stroke = Color3.fromRGB(44, 44, 72),
+	text = Color3.fromRGB(236, 238, 248),
+	subtext = Color3.fromRGB(139, 144, 170),
+	blue = Color3.fromRGB(0, 170, 255),
+	violet = Color3.fromRGB(139, 92, 246),
+	good = Color3.fromRGB(52, 211, 153),
+	warn = Color3.fromRGB(251, 191, 36),
+	bad = Color3.fromRGB(248, 113, 113),
+	off = Color3.fromRGB(58, 60, 84),
+}
+
+local LEVEL_COLORS = { INFO = THEME.subtext, WARN = THEME.warn, ERROR = THEME.bad }
+local BADGE_COLORS = {
+	VERIFIED = THEME.good,
+	UNTESTED = THEME.warn,
+	PARTIAL = THEME.blue,
+	UNSUPPORTED = THEME.off,
+	DEPENDENCIES = THEME.bad,
+}
+
+local Gui = { maid = Maid.new(), root = nil }
+
+---Create an instance from a property table. Parent is applied last.
+---@param className string
+---@param properties table
+---@return Instance
+local function create(className, properties)
+	local instance = Instance.new(className)
+	local parent = nil
+
+	for key, value in properties do
+		if key == "Parent" then
+			parent = value
+		else
+			instance[key] = value
+		end
+	end
+
+	instance.Parent = parent
+	return instance
+end
+
+---@param instance Instance
+---@param radius number
+local function addCorner(instance, radius)
+	create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = instance })
+end
+
+---@param instance Instance
+---@param color Color3
+local function addStroke(instance, color)
+	create("UIStroke", { Color = color, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = instance })
+end
+
+---@param instance Instance
+---@param rotation number
+local function addGradient(instance, rotation)
+	create("UIGradient", { Color = ColorSequence.new(THEME.blue, THEME.violet), Rotation = rotation or 0, Parent = instance })
+end
+
+---@param instance Instance
+---@param goal table
+---@param duration number?
+local function animate(instance, goal, duration)
+	tweenService:Create(instance, TweenInfo.new(duration or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal):Play()
+end
+
+---Build the whole interface. Every control calls a real function.
+function Gui.build()
+	local maid = Gui.maid
+	local refreshers = {}
+	local orders = {}
+
+	---@param parent Instance
+	---@return number
+	local function nextOrder(parent)
+		orders[parent] = (orders[parent] or 0) + 1
+		return orders[parent]
+	end
+
+	local hostParent = playerGui
+
+	if Dependencies.has("gethui") then
+		local success, result = pcall(gethui)
+		if success and result then
+			hostParent = result
+		end
+	else
+		Logger.warn("Gui", "gethui unavailable, using PlayerGui")
+	end
+
+	local screenGui = maid:add(create("ScreenGui", {
+		Name = "VantexHub",
+		ResetOnSpawn = false,
+		DisplayOrder = 999,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Parent = hostParent,
+	}))
+
+	Gui.root = screenGui
+
+	local camera = workspace.CurrentCamera
+
+	---@return Vector2
+	local function windowSize()
+		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		return Vector2.new(math.clamp(viewport.X - 16, 300, 560), math.clamp(viewport.Y - 16, 250, 380))
+	end
+
+	local size = windowSize()
+
+	local main = create("Frame", {
+		Name = "Main",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size.X, size.Y),
+		BackgroundColor3 = THEME.obsidian,
+		BorderSizePixel = 0,
+		Active = true,
+		Parent = screenGui,
+	})
+
+	addCorner(main, 12)
+	addStroke(main, THEME.stroke)
+
+	local uiScale = create("UIScale", { Scale = Config.get("uiScale"), Parent = main })
+
+	if camera then
+		maid:add(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			local updated = windowSize()
+			main.Size = UDim2.fromOffset(updated.X, updated.Y)
+		end))
+	end
+
+	maid:add(Config.changed:connect(function(key, value)
+		if key == "uiScale" then
+			uiScale.Scale = value
+		end
+	end).disconnect)
+
+	-- Header.
+	local header = create("Frame", {
+		Name = "Header",
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+		Parent = main,
+	})
+
+	addCorner(header, 12)
+
+	create("Frame", {
+		Position = UDim2.new(0, 0, 1, -12),
+		Size = UDim2.new(1, 0, 0, 12),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+		Parent = header,
+	})
+
+	local accentLine = create("Frame", {
+		Position = UDim2.new(0, 0, 1, -2),
+		Size = UDim2.new(1, 0, 0, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		Parent = header,
+	})
+
+	addGradient(accentLine, 0)
+
+	local title = create("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.new(1, -110, 1, -2),
+		Font = Enum.Font.GothamBlack,
+		Text = HUB_NAME,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = header,
+	})
+
+	addGradient(title, 0)
+
+	local chip = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -86, 0.5, -1),
+		Size = UDim2.fromOffset(78, 20),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		Text = "FARM OFF",
+		TextColor3 = THEME.subtext,
+		TextSize = 10,
+		Parent = header,
+	})
+
+	addCorner(chip, 10)
+
+	table.insert(refreshers, function()
+		local text, color = "FARM OFF", THEME.subtext
+
+		if Farm.running then
+			if Farm.paused then
+				text, color = "PAUSED", THEME.warn
+			elseif Farm.state == STATES.RECOVERING then
+				text, color = "RECOVERING", THEME.bad
+			elseif Farm.state == STATES.WAITING_FOR_RESPAWN then
+				text, color = "RESPAWNING", THEME.warn
+			else
+				text, color = "FARMING", THEME.good
+			end
+		end
+
+		chip.Text = text
+		chip.TextColor3 = color
+	end)
+
+	---@param text string
+	---@param offset number
+	---@param callback function
+	---@return TextButton
+	local function headerButton(text, offset, callback)
+		local button = create("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, offset, 0.5, -1),
+			Size = UDim2.fromOffset(32, 28),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 14,
+			Parent = header,
+		})
+
+		addCorner(button, 8)
+
+		maid:add(button.MouseEnter:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.hover })
+		end))
+
+		maid:add(button.MouseLeave:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.element })
+		end))
+
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	local openButton = maid:add(create("TextButton", {
+		Name = "Open",
+		Visible = false,
+		Position = UDim2.fromOffset(14, 90),
+		Size = UDim2.fromOffset(44, 44),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBlack,
+		Text = "V",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextSize = 20,
+		Parent = screenGui,
+	}))
+
+	addCorner(openButton, 22)
+	addGradient(openButton, 45)
+
+	---@param visible boolean
+	local function setVisible(visible)
+		main.Visible = visible
+		openButton.Visible = not visible
+	end
+
+	headerButton("-", -44, function()
+		setVisible(false)
+	end)
+
+	local closeArmedAt = 0
+	local closeButton = nil
+
+	closeButton = headerButton("X", -8, function()
+		if os.clock() - closeArmedAt > 3 then
+			closeArmedAt = os.clock()
+			closeButton.Text = "?"
+			closeButton.TextColor3 = THEME.bad
+			Notify.push("Tap X again to detach VANTEX HUB", "WARN")
+			return
+		end
+
+		Notify.push("Detaching VANTEX HUB", "INFO")
+
+		task.defer(function()
+			if shared.VantexHub then
+				shared.VantexHub.detach()
+			end
+		end)
+	end)
+
+	table.insert(refreshers, function()
+		if closeArmedAt > 0 and os.clock() - closeArmedAt > 3 then
+			closeArmedAt = 0
+			closeButton.Text = "X"
+			closeButton.TextColor3 = THEME.text
+		end
+	end)
+
+	maid:add(openButton.MouseButton1Click:Connect(function()
+		setVisible(true)
+	end))
+
+	maid:add(userInputService.InputBegan:Connect(function(input, processed)
+		if not processed and input.KeyCode == Enum.KeyCode.RightControl then
+			setVisible(not main.Visible)
+		end
+	end))
+
+	-- Dragging by the header, mouse and touch.
+	local dragging, dragStart, startPosition = false, nil, nil
+
+	maid:add(header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPosition = main.Position
+		end
+	end))
+
+	maid:add(userInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+
+	maid:add(userInputService.InputChanged:Connect(function(input)
+		local isMove = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+
+		if dragging and isMove then
+			local delta = input.Position - dragStart
+			main.Position = UDim2.new(
+				startPosition.X.Scale,
+				startPosition.X.Offset + delta.X,
+				startPosition.Y.Scale,
+				startPosition.Y.Offset + delta.Y
+			)
+		end
+	end))
+
+	-- Tab bar and pages.
+	local tabBar = create("Frame", {
+		Position = UDim2.fromOffset(8, 46),
+		Size = UDim2.new(1, -16, 0, 32),
+		BackgroundTransparency = 1,
+		Parent = main,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = tabBar,
+	})
+
+	local body = create("Frame", {
+		Position = UDim2.fromOffset(0, 84),
+		Size = UDim2.new(1, 0, 1, -84),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Parent = main,
+	})
+
+	local TAB_NAMES = { "Dashboard", "Farm", "Features", "Settings", "Logs" }
+	local pages, tabButtons = {}, {}
+
+	---@param name string
+	local function selectTab(name)
+		for tabName, page in pages do
+			local active = tabName == name
+			page.Visible = active
+
+			animate(tabButtons[tabName], {
+				BackgroundColor3 = active and THEME.hover or THEME.panel,
+				TextColor3 = active and THEME.text or THEME.subtext,
+			})
+		end
+	end
+
+	for index, name in TAB_NAMES do
+		local button = create("TextButton", {
+			LayoutOrder = index,
+			Size = UDim2.new(1 / #TAB_NAMES, -4, 1, 0),
+			BackgroundColor3 = THEME.panel,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = name,
+			TextColor3 = THEME.subtext,
+			TextSize = 12,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Parent = tabBar,
+		})
+
+		addCorner(button, 8)
+		maid:add(button.MouseButton1Click:Connect(function()
+			selectTab(name)
+		end))
+
+		local page = create("ScrollingFrame", {
+			Name = name,
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollBarThickness = 3,
+			ScrollBarImageColor3 = THEME.stroke,
+			Visible = false,
+			Parent = body,
+		})
+
+		create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 4),
+			PaddingBottom = UDim.new(0, 10),
+			PaddingLeft = UDim.new(0, 10),
+			PaddingRight = UDim.new(0, 12),
+			Parent = page,
+		})
+
+		pages[name] = page
+		tabButtons[name] = button
+	end
+
+	-- Toast notifications.
+	local toast = create("TextLabel", {
+		Name = "Toast",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 46),
+		Size = UDim2.new(0.8, 0, 0, 30),
+		BackgroundColor3 = THEME.element,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamMedium,
+		Text = "",
+		TextColor3 = THEME.text,
+		TextSize = 12,
+		TextTransparency = 1,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 20,
+		Parent = main,
+	})
+
+	addCorner(toast, 15)
+
+	local toastToken = 0
+
+	maid:add(Notify.shown:connect(function(message, level)
+		toastToken += 1
+		local token = toastToken
+
+		toast.Text = message
+		toast.TextColor3 = level == "ERROR" and THEME.bad or level == "WARN" and THEME.warn or THEME.text
+		animate(toast, { BackgroundTransparency = 0.05, TextTransparency = 0 }, 0.15)
+
+		task.delay(3, function()
+			if toastToken == token and toast.Parent then
+				animate(toast, { BackgroundTransparency = 1, TextTransparency = 1 }, 0.25)
+			end
+		end)
+	end).disconnect)
+
+	-- Reusable components.
+	---@param parent Instance
+	---@param height number
+	---@return Frame
+	local function createRow(parent, height)
+		local row = create("Frame", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, height),
+			BackgroundColor3 = THEME.element,
+			BorderSizePixel = 0,
+			Parent = parent,
+		})
+
+		addCorner(row, 8)
+		return row
+	end
+
+	---@param parent Instance
+	---@param text string
+	local function addSection(parent, text)
+		return create("TextLabel", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, 18),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = string.upper(text),
+			TextColor3 = THEME.blue,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = parent,
+		})
+	end
+
+	---A labelled value row refreshed from a getter.
+	---@param parent Instance
+	---@param label string
+	---@param getter function
+	---@param height number?
+	local function addInfo(parent, label, getter, height)
+		local row = createRow(parent, height or 46)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 14),
+			Font = Enum.Font.GothamBold,
+			Text = string.upper(label),
+			TextColor3 = THEME.subtext,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local value = create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 21),
+			Size = UDim2.new(1, -24, 0, (height or 46) - 25),
+			Font = Enum.Font.GothamMedium,
+			Text = "",
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Parent = row,
+		})
+
+		table.insert(refreshers, function()
+			value.Text = getter()
+		end)
+	end
+
+	---@param parent Instance
+	---@param text string
+	---@param callback function
+	---@param color Color3?
+	---@return TextButton
+	local function addButton(parent, text, callback, color)
+		local button = create("TextButton", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, 34),
+			BackgroundColor3 = color or THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			Parent = parent,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+
+		maid:add(button.MouseEnter:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.hover })
+		end))
+
+		maid:add(button.MouseLeave:Connect(function()
+			animate(button, { BackgroundColor3 = color or THEME.element })
+		end))
+
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	---A pill switch whose state always comes from a getter.
+	---@param row Frame
+	---@param getState function
+	---@param onClick function
+	local function addSwitch(row, getState, onClick)
+		local track = create("Frame", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -10, 0.5, 0),
+			Size = UDim2.fromOffset(42, 22),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(track, 11)
+
+		local knob = create("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 3, 0.5, 0),
+			Size = UDim2.fromOffset(16, 16),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			Parent = track,
+		})
+
+		addCorner(knob, 8)
+
+		local lastState = nil
+
+		local function sync()
+			local state = getState()
+			if state == lastState then
+				return
+			end
+
+			lastState = state
+
+			local on = state == "ON" or state == "PAUSED"
+			local color = state == "PAUSED" and THEME.warn or THEME.blue
+
+			animate(track, { BackgroundColor3 = on and color or THEME.off })
+			animate(knob, { Position = on and UDim2.new(0, 23, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) })
+		end
+
+		table.insert(refreshers, sync)
+
+		local hit = create("TextButton", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Text = "",
+			ZIndex = 5,
+			Parent = row,
+		})
+
+		maid:add(hit.MouseButton1Click:Connect(function()
+			onClick()
+			sync()
+		end))
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	local function addConfigToggle(parent, label, key)
+		local row = createRow(parent, 36)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 0),
+			Size = UDim2.new(1, -70, 1, 0),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		addSwitch(row, function()
+			return Config.get(key) and "ON" or "OFF"
+		end, function()
+			Config.set(key, not Config.get(key))
+		end)
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	local function addConfigCycle(parent, label, key)
+		local row = createRow(parent, 36)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 0),
+			Size = UDim2.new(1, -140, 1, 0),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local button = create("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -8, 0.5, 0),
+			Size = UDim2.fromOffset(120, 26),
+			BackgroundColor3 = THEME.panel,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = tostring(Config.get(key)),
+			TextColor3 = THEME.blue,
+			TextSize = 12,
+			Parent = row,
+		})
+
+		addCorner(button, 6)
+		addStroke(button, THEME.stroke)
+
+		maid:add(button.MouseButton1Click:Connect(function()
+			local options = SCHEMA[key].options
+			local index = table.find(options, Config.get(key)) or 0
+			Config.set(key, options[index % #options + 1])
+		end))
+
+		table.insert(refreshers, function()
+			button.Text = tostring(Config.get(key))
+		end)
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	---@param step number
+	---@param suffix string
+	local function addConfigSlider(parent, label, key, step, suffix)
+		local field = SCHEMA[key]
+		local row = createRow(parent, 50)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 16),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local valueLabel = create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 16),
+			Font = Enum.Font.GothamBold,
+			Text = "",
+			TextColor3 = THEME.blue,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = row,
+		})
+
+		local track = create("Frame", {
+			Position = UDim2.new(0, 12, 0, 34),
+			Size = UDim2.new(1, -24, 0, 6),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(track, 3)
+
+		local fill = create("Frame", {
+			Size = UDim2.fromScale(0, 1),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			Parent = track,
+		})
+
+		addCorner(fill, 3)
+		addGradient(fill, 0)
+
+		local function render()
+			local value = Config.get(key)
+			valueLabel.Text = string.format("%s%s", tostring(math.floor(value * 100 + 0.5) / 100), suffix)
+			fill.Size = UDim2.fromScale(math.clamp((value - field.min) / (field.max - field.min), 0, 1), 1)
+		end
+
+		local sliding = false
+
+		local function update(positionX)
+			local alpha = math.clamp((positionX - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+			local raw = field.min + (field.max - field.min) * alpha
+			Config.set(key, math.floor(raw / step + 0.5) * step)
+			render()
+		end
+
+		local hit = create("TextButton", {
+			Position = UDim2.new(0, 12, 0, 26),
+			Size = UDim2.new(1, -24, 0, 22),
+			BackgroundTransparency = 1,
+			Text = "",
+			ZIndex = 5,
+			Parent = row,
+		})
+
+		maid:add(hit.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = true
+				update(input.Position.X)
+			end
+		end))
+
+		maid:add(userInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = false
+			end
+		end))
+
+		maid:add(userInputService.InputChanged:Connect(function(input)
+			local isMove = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+			if sliding and isMove then
+				update(input.Position.X)
+			end
+		end))
+
+		table.insert(refreshers, render)
+		render()
+	end
+
+	-- Dashboard.
+	local dashboard = pages.Dashboard
+
+	addSection(dashboard, "Overview")
+
+	addInfo(dashboard, "Auto Farm", function()
+		return string.format("%s  -  %s", Farm.state, Farm.reason)
+	end)
+
+	addInfo(dashboard, "Active task", function()
+		return Farm.taskText()
+	end)
+
+	addInfo(dashboard, "Character", function()
+		local percent = Character.healthPercent()
+		if not percent then
+			return "No live character"
+		end
+
+		return string.format("Alive  -  %d%% health", math.floor(percent))
+	end)
+
+	addInfo(dashboard, "Progression", function()
+		local level, points = Progression.level(), Progression.points()
+		if not level then
+			return "Unavailable (Data.Level not found)"
+		end
+
+		return string.format("Level %d  -  %d unspent points", math.floor(level), math.floor(points or 0))
+	end)
+
+	addInfo(dashboard, "Session", function()
+		return string.format("%d kills  -  %.1f per minute", Farm.stats.kills, Farm.killsPerMinute())
+	end)
+
+	addInfo(dashboard, "Hit method", function()
+		return Combat.statusText()
+	end)
+
+	addInfo(dashboard, "Target tracking", function()
+		return Status.tracking
+	end)
+
+	addInfo(dashboard, "Loot and events", function()
+		return Status.chests .. "  -  " .. Status.raid
+	end)
+
+	addInfo(dashboard, "Travel", function()
+		if Navigation.busy then
+			return "Travelling to " .. Navigation.selectedName()
+		end
+
+		if ServerHop.busy then
+			return Status.hop
+		end
+
+		return "Idle"
+	end)
+
+	addInfo(dashboard, "Last notice", function()
+		return Logger.lastNotice
+	end, 58)
+
+	-- Farm tab.
+	local farmPage = pages.Farm
+
+	addSection(farmPage, "Control")
+
+	local farmRow = createRow(farmPage, 40)
+
+	create("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -70, 1, 0),
+		Font = Enum.Font.GothamBold,
+		Text = "Auto Farm",
+		TextColor3 = THEME.text,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = farmRow,
+	})
+
+	addSwitch(farmRow, function()
+		return Features.status("AutoFarm")
+	end, function()
+		Features.setEnabled("AutoFarm", not Features.isEnabled(Features.byKey.AutoFarm))
+	end)
+
+	local controls = create("Frame", {
+		LayoutOrder = nextOrder(farmPage),
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundTransparency = 1,
+		Parent = farmPage,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = controls,
+	})
+
+	local controlDefinitions = {
+		{ "Start", function() Features.setEnabled("AutoFarm", true) end },
+		{ "Pause", function() Farm.pause() end },
+		{ "Resume", function() Farm.resume() end },
+		{ "Stop", function() Features.setEnabled("AutoFarm", false) end },
+	}
+
+	local controlButtons = {}
+
+	for index, definition in controlDefinitions do
+		local button = create("TextButton", {
+			LayoutOrder = index,
+			Size = UDim2.new(0.25, -3, 1, 0),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = definition[1],
+			TextColor3 = THEME.text,
+			TextSize = 12,
+			Parent = controls,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+		maid:add(button.MouseButton1Click:Connect(definition[2]))
+		controlButtons[definition[1]] = button
+	end
+
+	-- Dim buttons that do nothing in the current state.
+	table.insert(refreshers, function()
+		local enabled = {
+			Start = not Farm.running,
+			Pause = Farm.running and not Farm.paused,
+			Resume = Farm.running and Farm.paused,
+			Stop = Farm.running,
+		}
+
+		for name, button in controlButtons do
+			button.TextColor3 = enabled[name] and THEME.text or THEME.off
+		end
+	end)
+
+	addSection(farmPage, "Live information")
+
+	addInfo(farmPage, "Quest", function()
+		local quest = Farm.context.quest
+		if not quest then
+			return "No quest selected yet"
+		end
+
+		local active = Quests.isActiveFor(quest)
+		return string.format("%s #%d  -  %s  -  %s", quest.name, quest.index, quest.mob, active and "active" or "not active")
+	end, 58)
+
+	addInfo(farmPage, "Target", function()
+		local target = Farm.context.target
+		if not Enemies.isAlive(target) then
+			return "None"
+		end
+
+		local humanoid = target:FindFirstChildOfClass("Humanoid")
+		local _, _, root = Character.get()
+		local distance = root and (target.HumanoidRootPart.Position - root.Position).Magnitude or 0
+
+		return string.format(
+			"%s  -  %d/%d HP  -  %d studs",
+			target.Name,
+			math.floor(humanoid.Health),
+			math.floor(humanoid.MaxHealth),
+			math.floor(distance)
+		)
+	end, 58)
+
+	addInfo(farmPage, "Progress", function()
+		if not Farm.running then
+			return "Auto Farm is off"
+		end
+
+		local sinceProgress = os.clock() - Farm.context.lastProgressAt
+		return string.format(
+			"%d kills  -  last progress %ds ago  -  recoveries %d",
+			Farm.stats.kills,
+			math.floor(sinceProgress),
+			Farm.context.recoveries
+		)
+	end, 58)
+
+	-- Features tab.
+	local featuresPage = pages.Features
+
+	local search = create("TextBox", {
+		LayoutOrder = nextOrder(featuresPage),
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Gotham,
+		PlaceholderText = "Search features...",
+		PlaceholderColor3 = THEME.subtext,
+		Text = "",
+		TextColor3 = THEME.text,
+		TextSize = 13,
+		Parent = featuresPage,
+	})
+
+	addCorner(search, 8)
+	addStroke(search, THEME.stroke)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), Parent = search })
+
+	local featureRows = {}
+	local categoryHeaders = {}
+
+	for _, feature in Features.list do
+		if not categoryHeaders[feature.category] then
+			categoryHeaders[feature.category] = addSection(featuresPage, feature.category)
+		end
+
+		local row = createRow(featuresPage, 52)
+		featureRows[feature] = row
+
+		local dot = create("Frame", {
+			Position = UDim2.fromOffset(10, 10),
+			Size = UDim2.fromOffset(8, 8),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(dot, 4)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(24, 4),
+			Size = UDim2.new(1, -150, 0, 18),
+			Font = Enum.Font.GothamBold,
+			Text = feature.name,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(24, 22),
+			Size = UDim2.new(1, -150, 0, 26),
+			Font = Enum.Font.Gotham,
+			Text = feature.description,
+			TextColor3 = THEME.subtext,
+			TextSize = 11,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Parent = row,
+		})
+
+		local badge = create("TextLabel", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -62, 0, 8),
+			Size = UDim2.fromOffset(74, 16),
+			BackgroundColor3 = THEME.panel,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = "",
+			TextColor3 = THEME.subtext,
+			TextSize = 9,
+			Parent = row,
+		})
+
+		addCorner(badge, 8)
+
+		table.insert(refreshers, function()
+			local compat = Features.effectiveCompat(feature)
+			badge.Text = COMPAT_BADGES[compat]
+			badge.TextColor3 = BADGE_COLORS[compat]
+
+			local status = Features.status(feature.key)
+			dot.BackgroundColor3 = status == "ON" and THEME.good or status == "PAUSED" and THEME.warn or THEME.off
+		end)
+
+		if feature.kind == "toggle" then
+			addSwitch(row, function()
+				return Features.status(feature.key)
+			end, function()
+				Features.setEnabled(feature.key, not Features.isEnabled(feature))
+			end)
+		elseif feature.kind == "action" then
+			local run = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -8, 0.5, 8),
+				Size = UDim2.fromOffset(50, 24),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Run",
+				TextColor3 = THEME.blue,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(run, 6)
+			addStroke(run, THEME.stroke)
+
+			maid:add(run.MouseButton1Click:Connect(function()
+				local available, reason = Features.available(feature)
+				if not available then
+					Notify.push(feature.name .. " unavailable: " .. tostring(reason), "WARN")
+					return
+				end
+
+				feature.run()
+			end))
+		else
+			row.Size = UDim2.new(1, 0, 0, 84)
+
+			local destination = create("TextButton", {
+				Position = UDim2.new(0, 24, 0, 50),
+				Size = UDim2.new(1, -110, 0, 26),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "",
+				TextColor3 = THEME.blue,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(destination, 6)
+			addStroke(destination, THEME.stroke)
+			maid:add(destination.MouseButton1Click:Connect(Navigation.cycle))
+
+			table.insert(refreshers, function()
+				destination.Text = Navigation.selectedName()
+			end)
+
+			local go = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -8, 0, 50),
+				Size = UDim2.fromOffset(40, 26),
+				BackgroundColor3 = THEME.blue,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Go",
+				TextColor3 = Color3.new(1, 1, 1),
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(go, 6)
+			maid:add(go.MouseButton1Click:Connect(Navigation.go))
+
+			local stop = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -52, 0, 50),
+				Size = UDim2.fromOffset(46, 26),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Stop",
+				TextColor3 = THEME.bad,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(stop, 6)
+			addStroke(stop, THEME.stroke)
+			maid:add(stop.MouseButton1Click:Connect(Navigation.cancel))
+		end
+	end
+
+	maid:add(search:GetPropertyChangedSignal("Text"):Connect(function()
+		local query = string.lower(search.Text)
+		local visibleCategories = {}
+
+		for feature, row in featureRows do
+			local haystack = string.lower(feature.name .. " " .. feature.description .. " " .. feature.category)
+			local matches = query == "" or string.find(haystack, query, 1, true) ~= nil
+
+			row.Visible = matches
+
+			if matches then
+				visibleCategories[feature.category] = true
+			end
+		end
+
+		for category, header in categoryHeaders do
+			header.Visible = visibleCategories[category] == true
+		end
+	end))
+
+	-- Settings tab.
+	local settingsPage = pages.Settings
+
+	addSection(settingsPage, "Interface")
+	addConfigSlider(settingsPage, "Interface scale", "uiScale", 0.05, "x")
+	addConfigSlider(settingsPage, "Refresh interval", "refreshInterval", 0.25, "s")
+	addConfigCycle(settingsPage, "Notifications", "notifications")
+
+	addSection(settingsPage, "Farming")
+	addConfigToggle(settingsPage, "Take level quests", "autoQuest")
+	addConfigCycle(settingsPage, "Weapon type", "weaponType")
+	addConfigCycle(settingsPage, "Hit method", "hitMethod")
+	addConfigCycle(settingsPage, "Click input", "inputMethod")
+	addConfigSlider(settingsPage, "Attack distance", "attackDistance", 1, " studs")
+	addConfigSlider(settingsPage, "Move speed", "moveSpeed", 10, " studs/s")
+	addConfigSlider(settingsPage, "Retreat below health (0 = off)", "retreatPercent", 5, "%")
+	addConfigCycle(settingsPage, "Stat target", "statTarget")
+
+	addSection(settingsPage, "Performance")
+
+	if Dependencies.has("setfpscap") then
+		addConfigSlider(settingsPage, "FPS cap (0 = unchanged)", "fpsCap", 10, "")
+	else
+		addInfo(settingsPage, "FPS cap", function()
+			return "Unavailable: executor has no setfpscap"
+		end, 40)
+	end
+
+	addSection(settingsPage, "Configuration")
+
+	addButton(settingsPage, "Save settings now", function()
+		Notify.push(Config.save() and "Settings saved" or "Settings could not be saved", "INFO")
+	end)
+
+	addButton(settingsPage, "Reload saved settings", function()
+		Config.load()
+
+		for key, value in Config.values do
+			Config.changed:fire(key, value)
+		end
+
+		Notify.push("Settings reloaded", "INFO")
+	end)
+
+	local resetButton = nil
+	local resetArmedAt = 0
+
+	resetButton = addButton(settingsPage, "Reset settings to defaults", function()
+		if os.clock() - resetArmedAt > 3 then
+			resetArmedAt = os.clock()
+			resetButton.Text = "Tap again to confirm reset"
+			return
+		end
+
+		resetArmedAt = 0
+		resetButton.Text = "Reset settings to defaults"
+		Config.resetToDefaults()
+		Notify.push("Settings reset", "INFO")
+	end, Color3.fromRGB(70, 28, 36))
+
+	table.insert(refreshers, function()
+		if resetArmedAt > 0 and os.clock() - resetArmedAt > 3 then
+			resetArmedAt = 0
+			resetButton.Text = "Reset settings to defaults"
+		end
+	end)
+
+	-- Logs tab.
+	local logsPage = pages.Logs
+	local logFilter = "All"
+	local logFilters = { "All", "Errors", "State" }
+	local lastLogVersion = -1
+	local logLabels = {}
+
+	local logControls = create("Frame", {
+		LayoutOrder = nextOrder(logsPage),
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundTransparency = 1,
+		Parent = logsPage,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = logControls,
+	})
+
+	---@param order number
+	---@param text string
+	---@param callback function
+	---@return TextButton
+	local function logButton(order, text, callback)
+		local button = create("TextButton", {
+			LayoutOrder = order,
+			Size = UDim2.new(1 / 4, -3, 1, 0),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 12,
+			Parent = logControls,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	local filterButton = nil
+
+	filterButton = logButton(1, "Filter: All", function()
+		local index = table.find(logFilters, logFilter) or 0
+		logFilter = logFilters[index % #logFilters + 1]
+		filterButton.Text = "Filter: " .. logFilter
+		lastLogVersion = -1
+	end)
+
+	logButton(2, "Diagnose", function()
+		task.spawn(function()
+			local success, errorMessage = pcall(Diagnostics.run)
+			if not success then
+				Logger.error("Diag", "Diagnostics failed: %s", firstLine(errorMessage))
+			end
+		end)
+	end)
+
+	logButton(3, "Copy", function()
+		if not Dependencies.has("setclipboard") then
+			Notify.push("Copy needs setclipboard", "WARN")
+			return
+		end
+
+		local lines = {}
+
+		for _, entry in Logger.entries do
+			table.insert(lines, string.format("%s [%s] %s: %s", entry.time, entry.level, entry.category, entry.message))
+		end
+
+		setclipboard(table.concat(lines, "\n"))
+		Notify.push("Logs copied", "INFO")
+	end)
+
+	logButton(4, "Clear", function()
+		Logger.clear()
+	end)
+
+	for index = 1, LOG_VIEW_LIMIT do
+		logLabels[index] = create("TextLabel", {
+			LayoutOrder = nextOrder(logsPage),
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			Text = "",
+			TextColor3 = THEME.subtext,
+			TextSize = 11,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Visible = false,
+			Parent = logsPage,
+		})
+	end
+
+	table.insert(refreshers, function()
+		if lastLogVersion == Logger.version or not pages.Logs.Visible then
+			return
+		end
+
+		lastLogVersion = Logger.version
+
+		local nearBottom = logsPage.CanvasPosition.Y + logsPage.AbsoluteWindowSize.Y >= logsPage.AbsoluteCanvasSize.Y - 40
+		local visible = {}
+
+		for index = #Logger.entries, 1, -1 do
+			local entry = Logger.entries[index]
+			local include = logFilter == "All"
+				or (logFilter == "Errors" and entry.level ~= "INFO")
+				or (logFilter == "State" and entry.category == "State")
+
+			if include then
+				table.insert(visible, 1, entry)
+
+				if #visible >= LOG_VIEW_LIMIT then
+					break
+				end
+			end
+		end
+
+		for index, label in logLabels do
+			local entry = visible[index]
+
+			if entry then
+				local suffix = entry.count > 1 and string.format(" (x%d)", entry.count) or ""
+				label.Text = string.format("%s %s %s: %s%s", entry.time, entry.level, entry.category, entry.message, suffix)
+				label.TextColor3 = LEVEL_COLORS[entry.level] or THEME.subtext
+				label.Visible = true
+			else
+				label.Visible = false
+			end
+		end
+
+		if nearBottom then
+			task.delay(0.05, function()
+				if logsPage.Parent then
+					logsPage.CanvasPosition = Vector2.new(0, 1e6)
+				end
+			end)
+		end
+	end)
+
+	-- Refresh loop. Interval comes from settings and every refresher is isolated.
+	local refreshActive = true
+	maid:add(function()
+		refreshActive = false
+	end)
+
+	task.spawn(function()
+		while refreshActive do
+			for _, refresher in refreshers do
+				local success, errorMessage = pcall(refresher)
+				if not success then
+					Logger.error("Gui", "%s", firstLine(errorMessage))
+				end
+			end
+
+			task.wait(Config.get("refreshInterval"))
+		end
+	end)
+
+	selectTab("Dashboard")
+end
+
+---Destroy the interface.
+function Gui.destroy()
+	Gui.maid:clean()
+	Gui.root = nil
+end
+
+--------------------------------------------------------------------------------
+-- Application lifecycle.
+--------------------------------------------------------------------------------
+
+local Vantex = { maid = Maid.new() }
+
+---Apply settings that touch the engine.
+---@param key string
+---@param value any
+local function onConfigChanged(key, value)
+	if key == "notifications" then
+		Notify.mode = value
+	elseif key == "fpsCap" and value > 0 and Dependencies.has("setfpscap") then
+		setfpscap(value)
+	end
+end
+
+---Stop everything and release every resource.
+function Vantex.detach()
+	Logger.info("Core", "Detaching")
+	Features.stopAll()
+	Farm.stop("detached")
+	Navigation.cancel()
+	Movement.cancel()
+	Config.save()
+	Character.destroy()
+	Gui.destroy()
+	Vantex.maid:clean()
+
+	if shared.VantexHub == Vantex then
+		shared.VantexHub = nil
+	end
+end
+
+---Start the hub.
+function Vantex.init()
+	Logger.info("Core", "%s starting", HUB_NAME)
+
+	local missing = Dependencies.missing({ "request", "writefile", "readfile", "isfile", "setclipboard", "setfpscap", "mouse1click", "gethui" })
+	if #missing > 0 then
+		Logger.warn("Core", "Optional executor functions missing: %s", table.concat(missing, ", "))
+	end
+
+	Config.load()
+	Notify.mode = Config.get("notifications")
+
+	local problems = Quests.validate()
+	if problems > 0 then
+		Logger.error("Quests", "%d invalid quest entries were found", problems)
+	end
+
+	if not QUEST_LISTS[game.PlaceId] then
+		Logger.warn("Core", "This place (%d) has no quest data, Auto Farm cannot run here", game.PlaceId)
+	end
+
+	Vantex.maid:add(Config.changed:connect(onConfigChanged).disconnect)
+
+	Vantex.maid:add(teleportService.TeleportInitFailed:Connect(function(_, result, message)
+		Notify.push(string.format("Teleport failed: %s", tostring(message ~= "" and message or result)), "ERROR")
+	end))
+
+	-- Anti-AFK so the idle kick does not interrupt long sessions.
+	Vantex.maid:add(localPlayer.Idled:Connect(function()
+		virtualUser:CaptureController()
+		virtualUser:ClickButton2(Vector2.new())
+	end))
+
+	Character.init()
+
+	-- Movement must not outlive the character it was moving.
+	Vantex.maid:add(Character.changed:connect(function(event)
+		if event == "died" or event == "removed" or event == "replaced" then
+			Movement.cancel()
+		end
+	end).disconnect)
+
+	Vantex.maid:add(Farm.changed:connect(function()
+		Features.changed:fire("AutoFarm")
+	end).disconnect)
+
+	local built, errorMessage = pcall(Gui.build)
+	if not built then
+		Logger.error("Gui", "Interface failed to build: %s", firstLine(errorMessage))
+		warn("[VANTEX] " .. firstLine(errorMessage))
+	end
+
+	for key, value in Config.values do
+		onConfigChanged(key, value)
+	end
+
+	Notify.push(HUB_NAME .. " ready. Right Ctrl hides the window.", "INFO")
+end
+
+shared.VantexHub = Vantex
+Vantex.init()
