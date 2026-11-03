@@ -1,0 +1,5537 @@
+-- VANTEX HUB for Blox Fruits. Luau, executor environment.
+-- Controls: Right Ctrl hides or shows the window. Tap X twice to detach everything.
+-- Place IDs: the classic IDs and the newer 2026 IDs are mapped. Unknown places can be forced in Settings.
+-- Executor functions used: gethui, request, readfile, writefile, isfile, setclipboard, setfpscap,
+-- mouse1click, firetouchinterest, setsimulationradius, sethiddenproperty, isnetworkowner, getgenv,
+-- getrenv, debug.getupvalues. A missing function only
+-- disables the feature that needs it.
+-- Status: nothing here is runtime-verified. Logs > Diagnose shows what works on your setup.
+
+-- Check for table that is shared between executions.
+if not shared then
+	return warn("No shared, no script.")
+end
+
+-- Detach any previous execution before building anything new.
+if shared.VantexHub then
+	pcall(shared.VantexHub.detach)
+	shared.VantexHub = nil
+end
+
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
+-- Constants.
+local HUB_NAME = "VANTEX HUB"
+local CONFIG_FILE = "VantexHub.json"
+local CONFIG_VERSION = 1
+local LOG_LIMIT = 200
+local LOG_VIEW_LIMIT = 60
+
+-- Both the classic and the newer 2026 place IDs map to the same seas.
+local PLACE_SEAS = {
+	[2753915549] = 1,
+	[85211729168715] = 1,
+	[4442272183] = 2,
+	[79091703265657] = 2,
+	[7449423635] = 3,
+	[100117331123089] = 3,
+}
+
+local DATA_TIMEOUT = 15
+local RESPAWN_TIMEOUT = 30
+local QUEST_VERIFY_TIMEOUT = 3
+local QUEST_MAX_ATTEMPTS = 3
+local QUEST_BLOCK_TIME = 60
+local QUEST_REACH = 20
+local ENTRANCE_DISTANCE = 3000
+local ENTRANCE_ATTEMPTS = 3
+local XP_CAP_LEVEL = 2800
+local NO_PROGRESS_TIMEOUT = 20
+local NO_DAMAGE_BURSTS = 3
+local NO_TARGET_TIMEOUT = 60
+local BUSY_TIMEOUT = 30
+local MAX_RECOVERIES = 5
+local RETREAT_HEIGHT = 150
+local RETREAT_TIMEOUT = 60
+local RESUME_PERCENT = 90
+local CAMP_RADIUS = 40
+local HOVER_LEASH = 14
+local HOVER_FLOOR = 8
+local HOVER_GROW_INTERVAL = 45
+local ACTION_BURST = 1.0
+local ACTIVATE_INTERVAL = 0.25
+local PILE_REFRESH = 0.4
+local MAX_PILE = 40
+local MULTI_CHECK_BURSTS = 3
+local BRING_STALL_BURSTS = 5
+local BRING_BLOCK_TIME = 120
+local DIRECT_MOVE_RANGE = 60
+local LOOP_FATAL_ERRORS = 10
+local LOW_HEALTH = "low health"
+
+local ACTION_ACCEPT = "ACCEPT_QUEST"
+local ACTION_ATTACK = "ATTACK"
+local ACTION_ENTER = "ENTER_AREA"
+
+local V = Vector3.new
+
+-- Quest data from public community hubs, the newest copy is dated late October 2026. Entry layout:
+-- { minLevel, questName, questIndex, mobName, questNpcPosition?, mobCampPosition?, entrancePosition?, entry? }.
+-- entrancePosition is handed to the game's requestEntrance command when the NPC is thousands of studs
+-- away. Update 30 rebuilt the First Sea, so saved positions can drift and live spawn points win.
+local SUBMARINE_PORT = V(-16269.41, 24.76, 1371.71)
+
+local SEA_ONE_QUESTS = {
+	{ 1, "BanditQuest1", 1, "Bandit", V(1059.37, 15.45, 1550.42), V(1045.96, 27.00, 1560.82) },
+	{ 10, "JungleQuest", 1, "Monkey", V(-1598.09, 35.55, 153.38), V(-1448.52, 67.85, 11.47) },
+	{ 15, "JungleQuest", 2, "Gorilla", V(-1598.09, 35.55, 153.38), V(-1129.88, 40.46, -525.42) },
+	{ 30, "BuggyQuest1", 1, "Pirate", V(-1141.07, 4.10, 3831.55), V(-1103.51, 13.75, 3896.09) },
+	{ 40, "BuggyQuest1", 2, "Brute", V(-1141.07, 4.10, 3831.55), V(-1140.08, 14.81, 4322.92) },
+	{ 60, "DesertQuest", 1, "Desert Bandit", V(894.49, 5.14, 4392.43), V(924.80, 6.45, 4481.59) },
+	{ 75, "DesertQuest", 2, "Desert Officer", V(894.49, 5.14, 4392.43), V(1608.28, 8.61, 4371.01) },
+	{ 90, "SnowQuest", 1, "Snow Bandit", V(1389.74, 88.15, -1298.91), V(1354.35, 87.27, -1393.95) },
+	{ 100, "SnowQuest", 2, "Snowman", V(1389.74, 88.15, -1298.91), V(1201.64, 144.58, -1550.07) },
+	{ 120, "MarineQuest2", 1, "Chief Petty Officer", V(-5039.59, 27.35, 4324.68), V(-4881.23, 22.65, 4273.75) },
+	{ 150, "SkyQuest", 1, "Sky Bandit", V(-4839.53, 716.37, -2619.44), V(-4953.21, 295.74, -2899.23) },
+	{ 175, "SkyQuest", 2, "Dark Master", V(-4839.53, 716.37, -2619.44), V(-5259.84, 391.40, -2229.04) },
+	{ 190, "PrisonerQuest", 1, "Prisoner", V(5308.93, 1.66, 475.12), V(5098.97, -0.32, 474.24) },
+	{ 210, "PrisonerQuest", 2, "Dangerous Prisoner", V(5308.93, 1.66, 475.12), V(5654.56, 15.63, 866.30) },
+	{ 250, "ColosseumQuest", 1, "Toga Warrior", V(-1580.05, 6.35, -2986.48), V(-1820.21, 51.68, -2740.67) },
+	{ 275, "ColosseumQuest", 2, "Gladiator", V(-1580.05, 6.35, -2986.48), V(-1292.84, 56.38, -3339.03) },
+	{ 300, "MagmaQuest", 1, "Military Soldier", V(-5313.37, 10.95, 8515.29), V(-5411.16, 11.08, 8454.29) },
+	{ 325, "MagmaQuest", 2, "Military Spy", V(-5313.37, 10.95, 8515.29), V(-5802.87, 86.26, 8828.86) },
+	{ 375, "FishmanQuest", 1, "Fishman Warrior", V(61122.65, 18.50, 1569.40), V(60878.30, 18.48, 1543.76), V(61163.85, 11.68, 1819.78) },
+	{ 400, "FishmanQuest", 2, "Fishman Commando", V(61122.65, 18.50, 1569.40), V(61922.63, 18.48, 1493.93), V(61163.85, 11.68, 1819.78) },
+	{ 450, "SkyExp1Quest", 1, "God's Guard", V(-4721.89, 843.87, -1949.97), V(-4710.04, 845.28, -1927.31), V(-4607.82, 872.54, -1667.56) },
+	{ 475, "SkyExp1Quest", 2, "Shanda", V(-7859.10, 5544.19, -381.48), V(-7678.49, 5566.40, -497.22), V(-7894.62, 5547.14, -380.29) },
+	{ 525, "SkyExp2Quest", 1, "Royal Squad", V(-7906.82, 5634.66, -1411.99), V(-7624.25, 5658.13, -1467.35) },
+	{ 550, "SkyExp2Quest", 2, "Royal Soldier", V(-7906.82, 5634.66, -1411.99), V(-7836.75, 5645.66, -1790.62) },
+	{ 625, "FountainQuest", 1, "Galley Pirate", V(5259.82, 37.35, 4050.03), V(5551.02, 78.90, 3930.41) },
+	{ 650, "FountainQuest", 2, "Galley Captain", V(5259.82, 37.35, 4050.03), V(5441.95, 42.50, 4950.09) },
+}
+
+local SEA_TWO_QUESTS = {
+	{ 700, "Area1Quest", 1, "Raider", V(-429.54, 71.77, 1836.18), V(-728.33, 52.78, 2345.77) },
+	{ 725, "Area1Quest", 2, "Mercenary", V(-429.54, 71.77, 1836.18), V(-1004.32, 80.16, 1424.62) },
+	{ 775, "Area2Quest", 1, "Swan Pirate", V(638.44, 71.77, 918.28), V(1068.66, 137.61, 1322.11) },
+	{ 800, "Area2Quest", 2, "Factory Staff", V(632.70, 73.11, 918.67), V(73.08, 81.86, -27.47) },
+	{ 875, "MarineQuest3", 1, "Marine Lieutenant", V(-2440.80, 71.71, -3216.07), V(-2821.37, 75.90, -3070.09) },
+	{ 900, "MarineQuest3", 2, "Marine Captain", V(-2440.80, 71.71, -3216.07), V(-1861.23, 80.18, -3254.70) },
+	{ 950, "ZombieQuest", 1, "Zombie", V(-5497.06, 47.59, -795.24), V(-5657.78, 78.97, -928.69) },
+	{ 975, "ZombieQuest", 2, "Vampire", V(-5497.06, 47.59, -795.24), V(-6037.67, 32.18, -1340.66) },
+	{ 1000, "SnowMountainQuest", 1, "Snow Trooper", V(609.86, 400.12, -5372.26), V(549.15, 427.39, -5563.70) },
+	{ 1050, "SnowMountainQuest", 2, "Winter Warrior", V(609.86, 400.12, -5372.26), V(1142.75, 475.64, -5199.42) },
+	{ 1100, "IceSideQuest", 1, "Lab Subordinate", V(-6064.07, 15.24, -4902.98), V(-5707.47, 15.95, -4513.39) },
+	{ 1125, "IceSideQuest", 2, "Horned Warrior", V(-6064.07, 15.24, -4902.98), V(-6341.37, 15.95, -5723.16) },
+	{ 1175, "FireSideQuest", 1, "Magma Ninja", V(-5428.03, 15.06, -5299.43), V(-5449.67, 76.66, -5808.20) },
+	{ 1200, "FireSideQuest", 2, "Lava Pirate", V(-5428.03, 15.06, -5299.43), V(-5213.33, 49.74, -4701.45) },
+	{ 1250, "ShipQuest1", 1, "Ship Deckhand", V(1037.80, 125.09, 32911.60), V(1212.01, 150.79, 33059.25), V(923.21, 126.98, 32852.83) },
+	{ 1275, "ShipQuest1", 2, "Ship Engineer", V(1037.80, 125.09, 32911.60), V(919.48, 43.54, 32779.97), V(923.21, 126.98, 32852.83) },
+	{ 1300, "ShipQuest2", 1, "Ship Steward", V(968.81, 125.09, 33244.13), V(919.44, 129.56, 33436.04), V(923.21, 126.98, 32852.83) },
+	{ 1325, "ShipQuest2", 2, "Ship Officer", V(968.81, 125.09, 33244.13), V(1036.02, 181.44, 33315.73), V(923.21, 126.98, 32852.83) },
+	{ 1350, "FrostQuest", 1, "Arctic Warrior", V(5667.66, 26.80, -6486.09), V(5966.25, 62.97, -6179.38), V(-6508.56, 5000.03, -132.84) },
+	{ 1375, "FrostQuest", 2, "Snow Lurker", V(5667.66, 26.80, -6486.09), V(5407.07, 69.19, -6880.88) },
+	{ 1425, "ForgottenQuest", 1, "Sea Soldier", V(-3054.44, 235.54, -10142.82), V(-3028.22, 64.67, -9775.43) },
+	{ 1450, "ForgottenQuest", 2, "Water Fighter", V(-3054.00, 240.00, -10146.00), V(-3291.00, 252.00, -10501.00) },
+}
+
+local SEA_THREE_QUESTS = {
+	{ 1500, "PiratePortQuest", 1, "Pirate Millionaire", V(-290.07, 42.90, 5581.59), V(-246.00, 47.31, 5584.10) },
+	{ 1525, "PiratePortQuest", 2, "Pistol Billionaire", V(-290.07, 42.90, 5581.59), V(-187.33, 86.24, 6013.51) },
+	{ 1575, "DragonCrewQuest", 1, "Dragon Crew Warrior", V(6738.96, 127.82, -713.51), V(6920.71, 56.16, -942.50) },
+	{ 1600, "DragonCrewQuest", 2, "Dragon Crew Archer", V(6738.96, 127.82, -713.51), V(6817.91, 484.80, 513.41) },
+	{ 1625, "VenomCrewQuest", 1, "Hydra Enforcer", V(5213.87, 1004.50, 758.69), V(4584.69, 1002.64, 705.80) },
+	{ 1650, "VenomCrewQuest", 2, "Venomous Assailant", V(5213.87, 1004.50, 758.69), V(4638.79, 1078.94, 881.80) },
+	{ 1700, "MarineTreeIsland", 1, "Marine Commodore", V(2180.54, 27.82, -6741.55), V(2286.01, 73.13, -7159.81) },
+	{ 1725, "MarineTreeIsland", 2, "Marine Rear Admiral", V(2179.99, 28.73, -6740.06), V(3656.77, 160.52, -7001.60) },
+	{ 1775, "DeepForestIsland3", 1, "Fishman Raider", V(-10581.66, 330.87, -8761.19), V(-10407.53, 331.76, -8368.52) },
+	{ 1800, "DeepForestIsland3", 2, "Fishman Captain", V(-10581.66, 330.87, -8761.19), V(-10994.70, 352.38, -9002.11) },
+	{ 1825, "DeepForestIsland", 1, "Forest Pirate", V(-13234.04, 331.49, -7625.40), V(-13274.48, 332.38, -7769.58) },
+	{ 1850, "DeepForestIsland", 2, "Mythological Pirate", V(-13234.04, 331.49, -7625.40), V(-13680.61, 501.08, -6991.19) },
+	{ 1900, "DeepForestIsland2", 1, "Jungle Pirate", V(-12680.38, 389.97, -9902.02), V(-12256.16, 331.74, -10485.84) },
+	{ 1925, "DeepForestIsland2", 2, "Musketeer Pirate", V(-12680.38, 389.97, -9902.02), V(-13457.90, 391.55, -9859.18) },
+	{ 1975, "HauntedQuest1", 1, "Reborn Skeleton", V(-9479.22, 141.22, 5566.09), V(-8763.72, 165.72, 6159.86) },
+	{ 2000, "HauntedQuest1", 2, "Living Zombie", V(-9479.22, 141.22, 5566.09), V(-10144.13, 138.63, 5838.09) },
+	{ 2025, "HauntedQuest2", 1, "Demonic Soul", V(-9516.99, 172.02, 6078.47), V(-9505.87, 172.10, 6158.99) },
+	{ 2050, "HauntedQuest2", 2, "Posessed Mummy", V(-9516.99, 172.02, 6078.47), V(-9582.02, 6.25, 6205.48) },
+	{ 2075, "NutsIslandQuest", 1, "Peanut Scout", V(-2104.39, 38.10, -10194.22), V(-2143.24, 47.72, -10030.00) },
+	{ 2100, "NutsIslandQuest", 2, "Peanut President", V(-2104.39, 38.10, -10194.22), V(-1859.35, 38.10, -10422.43) },
+	{ 2125, "IceCreamIslandQuest", 1, "Ice Cream Chef", V(-820.65, 65.82, -10965.80), V(-872.25, 65.82, -10919.96) },
+	{ 2150, "IceCreamIslandQuest", 2, "Ice Cream Commander", V(-820.65, 65.82, -10965.80), V(-558.06, 112.05, -11290.77) },
+	{ 2200, "CakeQuest1", 1, "Cookie Crafter", V(-2021.32, 37.80, -12028.73), V(-2374.14, 37.80, -12125.31) },
+	{ 2225, "CakeQuest1", 2, "Cake Guard", V(-2021.32, 37.80, -12028.73), V(-1598.31, 43.77, -12244.58) },
+	{ 2250, "CakeQuest2", 1, "Baking Staff", V(-1927.92, 37.80, -12842.54), V(-1887.81, 77.62, -12998.35) },
+	{ 2275, "CakeQuest2", 2, "Head Baker", V(-1927.92, 37.80, -12842.54), V(-2216.19, 82.88, -12869.29) },
+	{ 2300, "ChocQuest1", 1, "Cocoa Warrior", V(233.23, 29.88, -12201.23), V(-21.55, 80.57, -12352.39) },
+	{ 2325, "ChocQuest1", 2, "Chocolate Bar Battler", V(233.23, 29.88, -12201.23), V(582.59, 77.19, -12463.16) },
+	{ 2350, "ChocQuest2", 1, "Sweet Thief", V(150.51, 30.69, -12774.50), V(165.19, 76.06, -12600.84) },
+	{ 2375, "ChocQuest2", 2, "Candy Rebel", V(150.51, 30.69, -12774.50), V(134.87, 77.25, -12876.55) },
+	{ 2400, "CandyQuest1", 1, "Candy Pirate", V(-1150.04, 20.38, -14446.33), V(-1310.50, 26.02, -14562.40) },
+	{ 2425, "CandyQuest1", 2, "Snow Demon", V(-1150.04, 20.38, -14446.33), V(-880.20, 71.25, -14538.61) },
+	{ 2450, "TikiQuest1", 1, "Isle Outlaw", V(-16547.75, 61.14, -173.41), V(-16442.81, 116.14, -264.46) },
+	{ 2475, "TikiQuest1", 2, "Island Boy", V(-16547.75, 61.14, -173.41), V(-16901.26, 84.07, -192.89) },
+	{ 2500, "TikiQuest2", 1, "Sun-kissed Warrior", V(-16539.08, 55.69, 1051.57), nil },
+	{ 2525, "TikiQuest2", 2, "Isle Champion", V(-16539.08, 55.69, 1051.57), V(-16641.68, 235.78, 1031.28) },
+	{ 2550, "TikiQuest3", 1, "Serpent Hunter", V(-16665.19, 104.60, 1579.69), V(-16521.06, 106.09, 1488.78) },
+	{ 2575, "TikiQuest3", 2, "Skull Slayer", V(-16665.19, 104.60, 1579.69), V(-16855.04, 122.46, 1478.15) },
+	{ 2600, "SubmergedQuest1", 1, "Reef Bandit", V(10780.11, -2087.72, 9261.87), V(10943.08, -2083.04, 9177.34), nil, "submerged" },
+	{ 2625, "SubmergedQuest1", 2, "Coral Pirate", V(10780.11, -2087.72, 9261.87), V(10713.45, -2093.05, 9307.15), nil, "submerged" },
+	{ 2650, "SubmergedQuest2", 1, "Sea Chanter", V(10883.59, -2086.20, 10032.20), V(10647.61, -2077.63, 10079.96), nil, "submerged" },
+	{ 2675, "SubmergedQuest3", 1, "High Disciple", V(9635.87, -1992.45, 9614.39), V(9843.58, -1993.46, 9696.48), nil, "submerged" },
+	{ 2700, "SubmergedQuest3", 2, "Grand Devotee", V(9635.87, -1992.45, 9614.39), V(9591.05, -1993.47, 9808.71), nil, "submerged" },
+}
+
+local QUEST_LISTS = {
+	[1] = SEA_ONE_QUESTS,
+	[2] = SEA_TWO_QUESTS,
+	[3] = SEA_THREE_QUESTS,
+}
+
+-- Entry layout: { name, position }.
+local ISLANDS = {
+	[1] = {
+		{ "Start Island", V(1071.28, 16.31, 1426.87) },
+		{ "Middle Town", V(-655.82, 7.89, 1436.68) },
+		{ "Jungle", V(-1249.77, 11.89, 341.36) },
+		{ "Pirate Village", V(-1122.35, 4.79, 3855.92) },
+		{ "Desert", V(1094.15, 6.47, 4192.89) },
+		{ "Frozen Village", V(1198.01, 27.01, -1211.73) },
+		{ "Marine Fort", V(-4505.38, 20.69, 4260.56) },
+		{ "Colosseum", V(-1428.35, 7.39, -3014.37) },
+		{ "Sky Island 1", V(-4970.22, 717.71, -2622.35) },
+		{ "Prison", V(4854.16, 5.69, 740.19) },
+		{ "Magma Village", V(-5231.76, 8.62, 8467.88) },
+		{ "Fountain City", V(5132.71, 4.54, 4037.86) },
+	},
+	[2] = {
+		{ "Dock", V(82.95, 18.07, 2834.99) },
+		{ "Kingdom of Rose", V(-394.98, 118.50, 1245.84) },
+		{ "Cafe", V(-385.25, 73.05, 297.39) },
+		{ "Factory", V(430.43, 210.02, -432.50) },
+		{ "Colosseum", V(-1836.58, 44.59, 1360.31) },
+		{ "Green Zone", V(-2372.15, 72.99, -3166.51) },
+		{ "Graveyard", V(-5411.48, 48.82, -721.27) },
+		{ "Snow Mountain", V(511.83, 401.77, -5380.40) },
+		{ "Cold Island", V(-6026.96, 14.75, -5071.96) },
+		{ "Hot Island", V(-5478.39, 15.98, -5246.91) },
+		{ "Ice Castle", V(5400.40, 28.22, -6236.99) },
+		{ "Forgotten Island", V(-3043.32, 238.88, -10191.58) },
+	},
+	[3] = {
+		{ "Port Town", V(-610.31, 57.83, 6436.34) },
+		{ "Hydra Island", V(5229.99, 603.92, 345.15) },
+		{ "Great Tree", V(2174.95, 28.73, -6728.83) },
+		{ "Castle on the Sea", V(-5477.63, 313.79, -2808.46) },
+		{ "Floating Turtle", V(-10919.30, 331.79, -8637.57) },
+		{ "Mansion", V(-12553.81, 332.40, -7621.92) },
+		{ "Haunted Castle", V(-9512.36, 142.13, 5548.85) },
+		{ "Peanut Island", V(-2062.68, 38.13, -10287.75) },
+		{ "Ice Cream Island", V(-840.19, 65.85, -10877.38) },
+	},
+}
+
+-- Services.
+local playersService = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local runService = game:GetService("RunService")
+local tweenService = game:GetService("TweenService")
+local userInputService = game:GetService("UserInputService")
+local virtualUser = game:GetService("VirtualUser")
+local httpService = game:GetService("HttpService")
+local teleportService = game:GetService("TeleportService")
+local collectionService = game:GetService("CollectionService")
+
+local localPlayer = playersService.LocalPlayer
+
+--------------------------------------------------------------------------------
+-- Core utilities.
+--------------------------------------------------------------------------------
+
+---Format a message safely, never throwing on a bad template.
+---@param template string
+---@return string
+local function formatMessage(template, ...)
+	if select("#", ...) == 0 then
+		return tostring(template)
+	end
+
+	local success, result = pcall(string.format, template, ...)
+	return success and result or tostring(template)
+end
+
+---Keep only the first line of an error so logs stay readable.
+---@param message any
+---@return string
+local function firstLine(message)
+	return (string.match(tostring(message), "[^\n]+")) or "unknown error"
+end
+
+-- Tracks connections, instances, tweens, threads and callbacks for one-call cleanup.
+local Maid = {}
+Maid.__index = Maid
+
+---Create a new Maid.
+function Maid.new()
+	return setmetatable({ tasks = {} }, Maid)
+end
+
+---Track an item for cleanup.
+---@param item any
+---@return any
+function Maid:add(item)
+	table.insert(self.tasks, item)
+	return item
+end
+
+---Clean every tracked item. Errors are reported, never swallowed.
+function Maid:clean()
+	local tasks = self.tasks
+	self.tasks = {}
+
+	for _, item in tasks do
+		local success, errorMessage = pcall(function()
+			local itemType = typeof(item)
+
+			if itemType == "RBXScriptConnection" then
+				item:Disconnect()
+			elseif itemType == "Instance" then
+				if item:IsA("Tween") then
+					item:Cancel()
+				end
+
+				item:Destroy()
+			elseif itemType == "function" then
+				item()
+			elseif itemType == "thread" then
+				task.cancel(item)
+			end
+		end)
+
+		if not success then
+			warn("[VANTEX] cleanup failed: " .. firstLine(errorMessage))
+		end
+	end
+end
+
+-- Minimal signal with isolated handlers.
+local Signal = {}
+Signal.__index = Signal
+
+---Create a new Signal.
+function Signal.new()
+	return setmetatable({ handlers = {} }, Signal)
+end
+
+---Connect a handler.
+---@param handler function
+---@return table
+function Signal:connect(handler)
+	local handlers = self.handlers
+	local connection = { handler = handler, connected = true }
+	table.insert(handlers, connection)
+
+	connection.disconnect = function()
+		if not connection.connected then
+			return
+		end
+
+		connection.connected = false
+
+		local index = table.find(handlers, connection)
+		if index then
+			table.remove(handlers, index)
+		end
+	end
+
+	return connection
+end
+
+---Fire every handler. One failing handler never blocks the others.
+function Signal:fire(...)
+	for _, connection in table.clone(self.handlers) do
+		if connection.connected then
+			local success, errorMessage = pcall(connection.handler, ...)
+			if not success then
+				warn("[VANTEX] signal handler failed: " .. firstLine(errorMessage))
+			end
+		end
+	end
+end
+
+-- Detects which executor functions are present instead of assuming them.
+local Dependencies = { cache = {} }
+
+---Check whether the environment exposes a global. Results are cached.
+---@param name string
+---@return boolean
+function Dependencies.has(name)
+	local cached = Dependencies.cache[name]
+	if cached ~= nil then
+		return cached
+	end
+
+	local success, value = pcall(function()
+		return getgenv()[name]
+	end)
+
+	local found = success and value ~= nil
+
+	-- Some executors only expose functions in the running script's environment.
+	if not found then
+		local envSuccess, envValue = pcall(function()
+			return getfenv(1)[name]
+		end)
+
+		found = envSuccess and envValue ~= nil
+	end
+
+	Dependencies.cache[name] = found
+	return found
+end
+
+---Return the names from a list that are missing.
+---@param names table
+---@return table
+function Dependencies.missing(names)
+	local missing = {}
+
+	for _, name in names do
+		if not Dependencies.has(name) then
+			table.insert(missing, name)
+		end
+	end
+
+	return missing
+end
+
+-- Ring-buffer log shared by every module.
+local Logger = {
+	entries = {},
+	changed = Signal.new(),
+	lastNotice = "No notices yet",
+	version = 0,
+}
+
+---Add a log entry. Identical consecutive entries are merged.
+---@param level string
+---@param category string
+---@param message string
+function Logger.add(level, category, message)
+	local previous = Logger.entries[#Logger.entries]
+	Logger.version += 1
+
+	if previous and previous.level == level and previous.category == category and previous.message == message then
+		previous.count += 1
+	else
+		table.insert(Logger.entries, {
+			time = os.date("%H:%M:%S"),
+			level = level,
+			category = category,
+			message = message,
+			count = 1,
+		})
+
+		if #Logger.entries > LOG_LIMIT then
+			table.remove(Logger.entries, 1)
+		end
+	end
+
+	if level ~= "INFO" or category == "Notice" then
+		Logger.lastNotice = string.format("%s [%s] %s", os.date("%H:%M:%S"), level, message)
+	end
+
+	Logger.changed:fire()
+end
+
+---Log an informational entry.
+function Logger.info(category, ...)
+	Logger.add("INFO", category, formatMessage(...))
+end
+
+---Log a warning.
+function Logger.warn(category, ...)
+	Logger.add("WARN", category, formatMessage(...))
+end
+
+---Log an error.
+function Logger.error(category, ...)
+	Logger.add("ERROR", category, formatMessage(...))
+end
+
+---Remove every entry.
+function Logger.clear()
+	table.clear(Logger.entries)
+	Logger.version += 1
+	Logger.changed:fire()
+end
+
+-- User-visible notifications, filtered by the notification setting.
+local Notify = { shown = Signal.new(), mode = "All", lastMessage = nil, lastAt = 0 }
+
+---Push a notification and log it.
+---@param message string
+---@param level string?
+function Notify.push(message, level)
+	level = level or "INFO"
+	Logger.add(level, "Notice", message)
+
+	if Notify.mode == "Off" then
+		return
+	end
+
+	if Notify.mode == "Errors" and level == "INFO" then
+		return
+	end
+
+	-- Skip a toast identical to the previous one so loops cannot spam the screen.
+	local now = os.clock()
+	if message == Notify.lastMessage and now - Notify.lastAt < 2 then
+		return
+	end
+
+	Notify.lastMessage, Notify.lastAt = message, now
+	Notify.shown:fire(message, level)
+end
+
+--------------------------------------------------------------------------------
+-- Configuration with schema validation.
+--------------------------------------------------------------------------------
+
+local SCHEMA = {
+	uiScale = { kind = "number", default = 1, min = 0.7, max = 1.4 },
+	notifications = { kind = "enum", default = "All", options = { "All", "Errors", "Off" } },
+	refreshInterval = { kind = "number", default = 0.5, min = 0.25, max = 2 },
+	autoQuest = { kind = "boolean", default = true },
+	hoverHeight = { kind = "number", default = 20, min = 4, max = 150 },
+	attackRate = { kind = "number", default = 24, min = 4, max = 60 },
+	maxTargets = { kind = "number", default = 8, min = 1, max = 20 },
+	bringMobs = { kind = "boolean", default = true },
+	bringRange = { kind = "number", default = 250, min = 60, max = 400 },
+	hitRange = { kind = "number", default = 150, min = 20, max = 500 },
+	multiHit = { kind = "boolean", default = true },
+	seaOverride = { kind = "enum", default = "Auto", options = { "Auto", "1", "2", "3" } },
+	stopAtLevel = { kind = "number", default = 0, min = 0, max = 3000 },
+	moveSpeed = { kind = "number", default = 250, min = 100, max = 350 },
+	retreatPercent = { kind = "number", default = 35, min = 0, max = 60 },
+	inputMethod = { kind = "enum", default = "VirtualUser", options = { "VirtualUser", "Mouse" } },
+	hitMethod = { kind = "enum", default = "Auto", options = { "Auto", "Remote", "Click" } },
+	hitProfileName = { kind = "string", default = "", maxLength = 60 },
+	weaponType = { kind = "enum", default = "Melee", options = { "Melee", "Sword" } },
+	statTarget = { kind = "enum", default = "Melee", options = { "Melee", "Defense", "Sword", "Gun", "Demon Fruit" } },
+	fpsCap = { kind = "number", default = 0, min = 0, max = 360 },
+}
+
+local Config = { values = {}, changed = Signal.new(), saveQueued = false }
+
+---Validate a raw value against a field definition. Returns nil when invalid.
+---@param field table
+---@param value any
+---@return any
+local function coerce(field, value)
+	if field.kind == "number" then
+		if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then
+			return nil
+		end
+
+		return math.clamp(value, field.min, field.max)
+	end
+
+	if field.kind == "boolean" then
+		if type(value) ~= "boolean" then
+			return nil
+		end
+
+		return value
+	end
+
+	if field.kind == "string" then
+		if type(value) ~= "string" or #value > field.maxLength then
+			return nil
+		end
+
+		return value
+	end
+
+	if field.kind == "enum" and table.find(field.options, value) then
+		return value
+	end
+
+	return nil
+end
+
+---Reset values to defaults without firing change events.
+function Config.reset()
+	for key, field in SCHEMA do
+		Config.values[key] = field.default
+	end
+end
+
+---Read a value.
+---@param key string
+---@return any
+function Config.get(key)
+	return Config.values[key]
+end
+
+---Validate and store a value.
+---@param key string
+---@param value any
+---@return boolean
+function Config.set(key, value)
+	local field = SCHEMA[key]
+	if not field then
+		return false
+	end
+
+	local valid = coerce(field, value)
+	if valid == nil then
+		Logger.warn("Config", "Rejected invalid value for %s", key)
+		return false
+	end
+
+	if Config.values[key] == valid then
+		return true
+	end
+
+	Config.values[key] = valid
+	Config.changed:fire(key, valid)
+	Config.queueSave()
+	return true
+end
+
+---Restore every setting to its default and notify listeners.
+function Config.resetToDefaults()
+	for key, field in SCHEMA do
+		Config.set(key, field.default)
+	end
+
+	Logger.info("Config", "Settings reset to defaults")
+end
+
+---Save after a short delay so rapid slider drags write once.
+function Config.queueSave()
+	if Config.saveQueued then
+		return
+	end
+
+	Config.saveQueued = true
+	task.delay(0.5, Config.save)
+end
+
+---Write the config file.
+---@return boolean
+function Config.save()
+	Config.saveQueued = false
+
+	if not Dependencies.has("writefile") then
+		return false
+	end
+
+	local success, errorMessage = pcall(function()
+		writefile(CONFIG_FILE, httpService:JSONEncode({ version = CONFIG_VERSION, values = Config.values }))
+	end)
+
+	if not success then
+		Logger.error("Config", "Save failed: %s", firstLine(errorMessage))
+	end
+
+	return success
+end
+
+---Load and validate the config file. Invalid fields fall back to defaults.
+---@return boolean
+function Config.load()
+	Config.reset()
+
+	if not (Dependencies.has("isfile") and Dependencies.has("readfile")) then
+		Logger.warn("Config", "File functions unavailable, settings will not persist")
+		return false
+	end
+
+	if not isfile(CONFIG_FILE) then
+		Logger.info("Config", "No saved config, using defaults")
+		return true
+	end
+
+	local success, decoded = pcall(function()
+		return httpService:JSONDecode(readfile(CONFIG_FILE))
+	end)
+
+	if not (success and type(decoded) == "table" and type(decoded.values) == "table") then
+		Logger.warn("Config", "Saved config is malformed and was ignored")
+		return false
+	end
+
+	if decoded.version ~= CONFIG_VERSION then
+		Logger.warn("Config", "Saved config has an unknown version and was ignored")
+		return false
+	end
+
+	local rejected = 0
+
+	for key, field in SCHEMA do
+		local raw = decoded.values[key]
+
+		if raw ~= nil then
+			local valid = coerce(field, raw)
+
+			if valid == nil then
+				rejected += 1
+			else
+				Config.values[key] = valid
+			end
+		end
+	end
+
+	if rejected > 0 then
+		Logger.warn("Config", "%d invalid saved values were replaced by defaults", rejected)
+	end
+
+	return true
+end
+
+---The sea this place belongs to. Unknown places can be forced in Settings.
+---@return number?
+local function currentSea()
+	local override = Config.get("seaOverride")
+
+	if override ~= "Auto" then
+		return tonumber(override)
+	end
+
+	return PLACE_SEAS[game.PlaceId]
+end
+
+--------------------------------------------------------------------------------
+-- Game access: character, progression, remotes.
+--------------------------------------------------------------------------------
+
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- Owns the character lifecycle so no other module caches stale references.
+local Character = {
+	model = nil,
+	humanoid = nil,
+	root = nil,
+	alive = false,
+	changed = Signal.new(),
+	maid = Maid.new(),
+}
+
+---Bind a new character model and wait for its parts.
+---@param model Model
+function Character.bind(model)
+	Character.maid:clean()
+	Character.model = model
+	Character.humanoid = nil
+	Character.root = nil
+	Character.alive = false
+	Character.changed:fire("replaced")
+
+	task.spawn(function()
+		local humanoid = model:WaitForChild("Humanoid", 10)
+		local root = model:WaitForChild("HumanoidRootPart", 10)
+
+		-- A newer character may have replaced this one while we waited.
+		if Character.model ~= model then
+			return
+		end
+
+		if not (humanoid and root) then
+			Logger.warn("Character", "Humanoid or HumanoidRootPart missing")
+			return
+		end
+
+		Character.humanoid = humanoid
+		Character.root = root
+		Character.alive = humanoid.Health > 0
+
+		Character.maid:add(humanoid.Died:Connect(function()
+			Character.alive = false
+			Character.changed:fire("died")
+		end))
+
+		Character.maid:add(model.AncestryChanged:Connect(function(_, parent)
+			if not parent then
+				Character.alive = false
+				Character.changed:fire("removed")
+			end
+		end))
+
+		Character.changed:fire("ready")
+	end)
+end
+
+---Return model, humanoid and root when the character is usable.
+---@return Model?, Humanoid?, BasePart?
+function Character.get()
+	local humanoid, root = Character.humanoid, Character.root
+
+	if not (Character.alive and humanoid and root and root.Parent and humanoid.Health > 0) then
+		return nil, nil, nil
+	end
+
+	return Character.model, humanoid, root
+end
+
+---Current health as a percentage, or nil without a character.
+---@return number?
+function Character.healthPercent()
+	local _, humanoid = Character.get()
+	if not humanoid or humanoid.MaxHealth <= 0 then
+		return nil
+	end
+
+	return humanoid.Health / humanoid.MaxHealth * 100
+end
+
+---Start listening for characters.
+function Character.init()
+	Character.connection = localPlayer.CharacterAdded:Connect(Character.bind)
+
+	if localPlayer.Character then
+		Character.bind(localPlayer.Character)
+	end
+end
+
+---Disconnect everything.
+function Character.destroy()
+	if Character.connection then
+		Character.connection:Disconnect()
+		Character.connection = nil
+	end
+
+	Character.maid:clean()
+end
+
+-- Reads progression values defensively.
+local Progression = {}
+
+---@param name string
+---@return number?
+local function readDataValue(name)
+	local data = localPlayer:FindFirstChild("Data")
+	local value = data and data:FindFirstChild(name)
+
+	if value and type(value.Value) == "number" then
+		return value.Value
+	end
+
+	return nil
+end
+
+---@return number?
+function Progression.level()
+	return readDataValue("Level")
+end
+
+---@return number?
+function Progression.points()
+	return readDataValue("Points")
+end
+
+-- Wraps the game's CommF_ remote. Its calls are undocumented and may change.
+local Remotes = { commF = nil, lastWarning = 0 }
+
+---Find CommF_ without throwing.
+---@return RemoteFunction?
+function Remotes.getCommF()
+	if Remotes.commF and Remotes.commF.Parent then
+		return Remotes.commF
+	end
+
+	local folder = replicatedStorage:FindFirstChild("Remotes")
+	local remote = folder and folder:FindFirstChild("CommF_")
+
+	if remote and remote:IsA("RemoteFunction") then
+		Remotes.commF = remote
+		return remote
+	end
+
+	if os.clock() - Remotes.lastWarning > 30 then
+		Remotes.lastWarning = os.clock()
+		Logger.warn("Remotes", "ReplicatedStorage.Remotes.CommF_ not found")
+	end
+
+	return nil
+end
+
+---Invoke CommF_ safely.
+---@return boolean, any
+function Remotes.invoke(...)
+	local commF = Remotes.getCommF()
+	if not commF then
+		return false, "CommF_ unavailable"
+	end
+
+	local success, result = pcall(commF.InvokeServer, commF, ...)
+	if not success then
+		return false, firstLine(result)
+	end
+
+	return true, result
+end
+
+--------------------------------------------------------------------------------
+-- Movement: one controller, one owner at a time.
+--------------------------------------------------------------------------------
+
+local Movement = {
+	owner = nil,
+	tween = nil,
+	token = 0,
+	originals = {},
+	noclipConnection = nil,
+}
+
+---Enable or disable temporary noclip. Original collision values are restored.
+---@param enabled boolean
+function Movement.setNoclip(enabled)
+	if enabled then
+		if Movement.noclipConnection then
+			return
+		end
+
+		local model = Character.get()
+		if not model then
+			return
+		end
+
+		local parts = {}
+
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				Movement.originals[descendant] = descendant.CanCollide
+				table.insert(parts, descendant)
+			end
+		end
+
+		Movement.noclipConnection = runService.Stepped:Connect(function()
+			for _, part in parts do
+				part.CanCollide = false
+			end
+
+			local _, _, root = Character.get()
+			if root then
+				root.AssemblyLinearVelocity = Vector3.zero
+			end
+		end)
+
+		return
+	end
+
+	if Movement.noclipConnection then
+		Movement.noclipConnection:Disconnect()
+		Movement.noclipConnection = nil
+	end
+
+	for part, original in Movement.originals do
+		if part.Parent then
+			part.CanCollide = original
+		end
+	end
+
+	table.clear(Movement.originals)
+end
+
+---Cancel the current movement. Pass an owner to cancel only that owner's movement.
+---@param owner string?
+function Movement.cancel(owner)
+	if owner and Movement.owner ~= owner then
+		return
+	end
+
+	Movement.token += 1
+
+	if Movement.tween then
+		Movement.tween:Cancel()
+		Movement.tween = nil
+	end
+
+	Movement.owner = nil
+	Movement.setNoclip(false)
+end
+
+---Place the character instantly if nobody else owns movement.
+---@param owner string
+---@param targetCFrame CFrame
+---@return boolean
+function Movement.place(owner, targetCFrame)
+	if Movement.owner and Movement.owner ~= owner then
+		return false
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return false
+	end
+
+	root.CFrame = targetCFrame
+	root.AssemblyLinearVelocity = Vector3.zero
+	return true
+end
+
+---Move to a CFrame. Returns true on arrival, or false plus a reason.
+---@param owner string
+---@param targetCFrame CFrame
+---@param shouldAbort function?
+---@return boolean, string?
+function Movement.moveTo(owner, targetCFrame, shouldAbort)
+	if Movement.owner and Movement.owner ~= owner then
+		return false, "busy"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return false, "character lost"
+	end
+
+	local distance = (root.Position - targetCFrame.Position).Magnitude
+	if distance <= DIRECT_MOVE_RANGE then
+		if Movement.place(owner, targetCFrame) then
+			return true, nil
+		end
+
+		return false, "character lost"
+	end
+
+	Movement.token += 1
+	local token = Movement.token
+	Movement.owner = owner
+
+	local duration = distance / Config.get("moveSpeed")
+	local tween = tweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCFrame })
+
+	Movement.tween = tween
+	Movement.setNoclip(true)
+	tween:Play()
+
+	local startedAt = os.clock()
+	local arrived, reason = true, nil
+
+	while os.clock() - startedAt < duration do
+		task.wait()
+
+		if Movement.token ~= token then
+			arrived, reason = false, "cancelled"
+			break
+		end
+
+		if shouldAbort and shouldAbort() then
+			arrived, reason = false, "aborted"
+			break
+		end
+
+		if not Character.get() then
+			arrived, reason = false, "character lost"
+			break
+		end
+	end
+
+	-- Only clean up if a newer move has not taken over.
+	if Movement.token == token then
+		tween:Cancel()
+		Movement.tween = nil
+		Movement.owner = nil
+		Movement.setNoclip(false)
+
+		if arrived then
+			Movement.place(owner, targetCFrame)
+		end
+	end
+
+	return arrived, reason
+end
+
+---Hold the character in place, running an update callback every frame. Returns a release function,
+---or nil when another owner is moving the character.
+---@param owner string
+---@param update function
+---@return function?
+function Movement.hold(owner, update)
+	if Movement.owner and Movement.owner ~= owner then
+		return nil
+	end
+
+	Movement.owner = owner
+	Movement.token += 1
+
+	local token = Movement.token
+	local failures = 0
+	local connection = nil
+
+	Movement.setNoclip(true)
+
+	connection = runService.Heartbeat:Connect(function()
+		if Movement.token ~= token then
+			connection:Disconnect()
+			return
+		end
+
+		local success, errorMessage = pcall(update)
+
+		if not success then
+			failures += 1
+			Logger.error("Movement", "Hold update failed: %s", firstLine(errorMessage))
+
+			if failures >= 20 then
+				connection:Disconnect()
+			end
+		end
+	end)
+
+	local released = false
+
+	return function()
+		if released then
+			return
+		end
+
+		released = true
+		connection:Disconnect()
+
+		-- A newer move or cancel owns the state now, leave it alone.
+		if Movement.token == token then
+			Movement.owner = nil
+			Movement.setNoclip(false)
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Quests, enemies and combat helpers.
+--------------------------------------------------------------------------------
+
+local Quests = {}
+
+---Check every quest list for malformed entries.
+---@return number
+function Quests.validate()
+	local problems = 0
+
+	for sea, list in QUEST_LISTS do
+		local previous = 0
+
+		for index, entry in list do
+			local valid = type(entry[1]) == "number"
+				and type(entry[2]) == "string"
+				and type(entry[3]) == "number"
+				and type(entry[4]) == "string"
+				and entry[1] > previous
+				and (entry[5] == nil or typeof(entry[5]) == "Vector3")
+				and (entry[6] == nil or typeof(entry[6]) == "Vector3")
+				and (entry[7] == nil or typeof(entry[7]) == "Vector3")
+				and (entry[8] == nil or type(entry[8]) == "string")
+
+			if not valid then
+				problems += 1
+				Logger.error("Quests", "Invalid quest entry %d in sea %d", index, sea)
+			end
+
+			previous = type(entry[1]) == "number" and entry[1] or previous
+		end
+	end
+
+	return problems
+end
+
+---Select the highest quest unlocked at a level.
+---@param level number
+---@return table?, string?
+function Quests.select(level)
+	local list = QUEST_LISTS[currentSea() or 0]
+	if not list then
+		return nil, "No quest data for this place, set the sea in Settings"
+	end
+
+	local picked = nil
+
+	for _, entry in list do
+		if level >= entry[1] then
+			picked = entry
+		end
+	end
+
+	if not picked then
+		return nil, "No quest unlocked at level " .. tostring(level)
+	end
+
+	return {
+		name = picked[2],
+		index = picked[3],
+		mob = picked[4],
+		npcPosition = picked[5],
+		campPosition = picked[6],
+		entrance = picked[7],
+		entry = picked[8],
+		minLevel = picked[1],
+	}, nil
+end
+
+---Read the quest UI. Returns a table or nil plus a reason.
+---@return table?, string?
+function Quests.readActive()
+	local main = playerGui:FindFirstChild("Main")
+	local questGui = main and main:FindFirstChild("Quest")
+
+	if not questGui then
+		return nil, "Quest UI not found"
+	end
+
+	local container = questGui:FindFirstChild("Container")
+	local holder = container and container:FindFirstChild("QuestTitle")
+	local label = holder and holder:FindFirstChild("Title")
+	local title = label and label:IsA("TextLabel") and label.Text or ""
+
+	return { visible = questGui.Visible, title = title }, nil
+end
+
+---Check whether the active quest targets this quest's mob.
+---@param quest table
+---@return boolean, string?
+function Quests.isActiveFor(quest)
+	local info, reason = Quests.readActive()
+	if not info then
+		return false, reason
+	end
+
+	return info.visible and string.find(info.title, quest.mob, 1, true) ~= nil, nil
+end
+
+-- Locations that need a travel step before their quests can be reached.
+local Entrances = {}
+
+---Whether the player is on Submerged Island or in its cavern.
+---@return boolean
+function Entrances.inSubmerged()
+	local location = localPlayer:GetAttribute("CurrentLocation")
+	return location == "Submerged Island" or location == "Sealed Cavern"
+end
+
+---The submarine worker remote used to reach Submerged Island.
+---@return RemoteFunction?
+function Entrances.submarineRemote()
+	local modules = replicatedStorage:FindFirstChild("Modules")
+	local net = modules and modules:FindFirstChild("Net")
+	local remote = net and net:FindFirstChild("RF/SubmarineWorkerSpeak")
+
+	if remote and remote:IsA("RemoteFunction") then
+		return remote
+	end
+
+	return nil
+end
+
+local Enemies = { warned = false }
+
+---@return Folder?
+function Enemies.folder()
+	local folder = workspace:FindFirstChild("Enemies")
+
+	if not folder and not Enemies.warned then
+		Enemies.warned = true
+		Logger.warn("Enemies", "workspace.Enemies not found, is this a supported place?")
+	end
+
+	return folder
+end
+
+---Match an enemy name, allowing older "[Lv. N]" suffixes.
+---@param name string
+---@param mobName string
+---@return boolean
+function Enemies.matches(name, mobName)
+	if name == mobName then
+		return true
+	end
+
+	-- Level tags such as "[Lv. 5]" can sit anywhere in the name.
+	local cleaned = string.gsub(name, "%s*%[.-%]", "")
+	return string.gsub(cleaned, "%s+$", "") == mobName
+end
+
+---@param model Instance?
+---@return boolean
+function Enemies.isAlive(model)
+	if not (model and model.Parent) then
+		return false
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") ~= nil
+end
+
+---Find the nearest living enemy, optionally restricted to one mob name.
+---@param mobName string?
+---@param origin Vector3
+---@return Model?, number?
+function Enemies.nearest(mobName, origin)
+	local folder = Enemies.folder()
+	if not folder then
+		return nil, nil
+	end
+
+	local closest, closestDistance = nil, math.huge
+
+	for _, enemy in folder:GetChildren() do
+		if mobName and not Enemies.matches(enemy.Name, mobName) then
+			continue
+		end
+
+		if not Enemies.isAlive(enemy) then
+			continue
+		end
+
+		local distance = (enemy.HumanoidRootPart.Position - origin).Magnitude
+		if distance < closestDistance then
+			closest, closestDistance = enemy, distance
+		end
+	end
+
+	return closest, closestDistance
+end
+
+---Pick where mobs of a quest spawn: live spawn points first, saved data second.
+---@param quest table
+---@param origin Vector3
+---@return Vector3?
+function Enemies.campPosition(quest, origin)
+	local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+	local spawns = worldOrigin and worldOrigin:FindFirstChild("EnemySpawns")
+	local best, bestDistance = nil, math.huge
+
+	if spawns then
+		for _, spawnPart in spawns:GetChildren() do
+			if spawnPart:IsA("BasePart") and Enemies.matches(spawnPart.Name, quest.mob) then
+				local distance = (spawnPart.Position - origin).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = spawnPart.Position, distance
+				end
+			end
+		end
+	end
+
+	return best or quest.campPosition
+end
+
+-- A pile is every living mob of one type near a point, nearest first.
+local Pile = {}
+
+---@param mobName string
+---@param origin Vector3
+---@param range number
+---@param include Model?
+---@return table, table
+function Pile.collect(mobName, origin, range, include)
+	local list, distances = {}, {}
+	local folder = Enemies.folder()
+
+	if folder then
+		for _, enemy in folder:GetChildren() do
+			if Enemies.matches(enemy.Name, mobName) and Enemies.isAlive(enemy) then
+				local distance = (enemy.HumanoidRootPart.Position - origin).Magnitude
+
+				if distance <= range then
+					distances[enemy] = distance
+					table.insert(list, enemy)
+				end
+			end
+		end
+	end
+
+	-- The current target always belongs to the pile, even before it arrives.
+	if include and distances[include] == nil and Enemies.isAlive(include) then
+		distances[include] = 0
+		table.insert(list, include)
+	end
+
+	table.sort(list, function(a, b)
+		return distances[a] < distances[b]
+	end)
+
+	while #list > MAX_PILE do
+		table.remove(list)
+	end
+
+	return list, distances
+end
+
+---@param list table
+---@return Model?
+function Pile.firstAlive(list)
+	for _, enemy in list do
+		if Enemies.isAlive(enemy) then
+			return enemy
+		end
+	end
+
+	return nil
+end
+
+---Record member health, adding new members to an existing snapshot.
+---@param list table
+---@param snapshot table?
+---@return table
+function Pile.snapshot(list, snapshot)
+	snapshot = snapshot or {}
+
+	for _, enemy in list do
+		if snapshot[enemy] == nil then
+			local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+
+			if humanoid then
+				snapshot[enemy] = humanoid.Health
+			end
+		end
+	end
+
+	return snapshot
+end
+
+---@param snapshot table
+---@return number
+function Pile.count(snapshot)
+	local count = 0
+
+	for _ in snapshot do
+		count += 1
+	end
+
+	return count
+end
+
+---How many snapshot members are dead or gone.
+---@param snapshot table
+---@return number
+function Pile.deaths(snapshot)
+	local deaths = 0
+
+	for enemy in snapshot do
+		if not Enemies.isAlive(enemy) then
+			deaths += 1
+		end
+	end
+
+	return deaths
+end
+
+---Whether any snapshot member other than `ignore` lost health, died or vanished.
+---@param snapshot table
+---@param ignore Model?
+---@return boolean
+function Pile.damaged(snapshot, ignore)
+	for enemy, health in snapshot do
+		if enemy ~= ignore then
+			local humanoid = enemy.Parent and enemy:FindFirstChildOfClass("Humanoid")
+
+			if not humanoid or humanoid.Health < health - 0.5 then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+---The greatest recorded distance among snapshot members that lost health, or nil.
+---@param snapshot table
+---@param distances table
+---@return number?
+function Pile.farthestDamaged(snapshot, distances)
+	local farthest = nil
+
+	for enemy, health in snapshot do
+		local distance = distances[enemy]
+
+		if distance then
+			local humanoid = enemy.Parent and enemy:FindFirstChildOfClass("Humanoid")
+
+			if not humanoid or humanoid.Health < health - 0.5 then
+				farthest = math.max(farthest or 0, distance)
+			end
+		end
+	end
+
+	return farthest
+end
+
+-- Moves mobs onto one point. It needs the executor to raise the simulation radius so this client owns
+-- them, and it notices when ownership never arrives.
+local Bring = { active = false, originalRadius = nil, stilled = setmetatable({}, { __mode = "k" }) }
+
+---@param radius number
+function Bring.applyRadius(radius)
+	if Dependencies.has("setsimulationradius") then
+		pcall(setsimulationradius, radius, radius)
+	end
+
+	if Dependencies.has("sethiddenproperty") then
+		pcall(sethiddenproperty, localPlayer, "SimulationRadius", radius)
+	end
+end
+
+---Raise the simulation radius, remembering the original so it can be restored.
+function Bring.start()
+	if Bring.active then
+		return
+	end
+
+	Bring.active = true
+
+	if Dependencies.has("getsimulationradius") then
+		local success, value = pcall(getsimulationradius)
+
+		if success and type(value) == "number" then
+			Bring.originalRadius = value
+		end
+	end
+
+	Bring.applyRadius(math.huge)
+
+	if not (Dependencies.has("setsimulationradius") or Dependencies.has("sethiddenproperty")) then
+		Logger.warn("Bring", "No way to raise the simulation radius, mobs may not follow the pile")
+	end
+end
+
+---Restore the simulation radius.
+function Bring.stop()
+	if not Bring.active then
+		return
+	end
+
+	Bring.active = false
+	Bring.applyRadius(Bring.originalRadius or 1000)
+	Bring.originalRadius = nil
+end
+
+---Place every pile member on one point.
+---@param list table
+---@param point Vector3
+function Bring.pin(list, point)
+	local pinned = CFrame.new(point)
+
+	for _, enemy in list do
+		local enemyRoot = enemy:FindFirstChild("HumanoidRootPart")
+
+		if enemyRoot then
+			enemyRoot.CFrame = pinned
+			enemyRoot.AssemblyLinearVelocity = Vector3.zero
+			enemyRoot.CanCollide = false
+
+			if not Bring.stilled[enemy] then
+				Bring.stilled[enemy] = true
+
+				local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+				if humanoid then
+					humanoid.WalkSpeed = 0
+				end
+			end
+		end
+	end
+end
+
+---Count pile members whose physics this client owns, or nil when that cannot be checked.
+---@param list table
+---@return number?
+function Bring.ownedCount(list)
+	if not Dependencies.has("isnetworkowner") then
+		return nil
+	end
+
+	local owned = 0
+
+	for _, enemy in list do
+		local enemyRoot = enemy:FindFirstChild("HumanoidRootPart")
+
+		if enemyRoot then
+			local success, result = pcall(isnetworkowner, enemyRoot)
+
+			if success and result then
+				owned += 1
+			end
+		end
+	end
+
+	return owned
+end
+
+local Combat = {
+	warned = {},
+	remotes = {},
+	lastScan = -10,
+	sessionValue = nil,
+	sessionStamp = -10,
+	profileIndex = nil,
+	verifiedIndex = nil,
+	noDamageBursts = 0,
+	failedProfiles = 0,
+	multiMisses = 0,
+	multiConfirmed = false,
+	lastActivate = -10,
+	cursor = 0,
+	hitsSent = 0,
+	rate = 0,
+	rateSampleAt = os.clock(),
+	rateSampleCount = 0,
+	hoverCap = nil,
+	hoverCapAt = 0,
+	hoverMisses = 0,
+	verifiedHover = nil,
+	farthestHit = 0,
+}
+
+-- Hit profiles, newest public format first. "pair" sends { model, part } pairs the way the most recent
+-- community hubs do, "session" adds the combat session value some builds expect. multi = "calls" fires
+-- one hit per target in the pile, "list" names the whole pile in a single call, false hits one target.
+-- "activate" and "click" use the game's own tool input and need no remotes. The farm verifies damage,
+-- rotates profiles that do nothing, and steps pile profiles down when only the primary takes damage.
+local HIT_PROFILES = {
+	{ kind = "remote", shape = "pair", part = "Head", multi = "calls", attackArg = 0, name = "Pair / Head / each target" },
+	{ kind = "remote", shape = "pair", part = "Head", multi = "list", attackArg = 0, name = "Pair / Head / one call" },
+	{ kind = "remote", shape = "pair", part = "Head", multi = false, attackArg = 0, name = "Pair / Head" },
+	{ kind = "remote", shape = "session", part = "RightLowerLeg", third = "nil", multi = "calls", attackArg = 0.5, name = "Session / RightLowerLeg / each target" },
+	{ kind = "remote", shape = "session", part = "RightLowerLeg", third = "nil", multi = false, attackArg = 0.5, name = "Session / RightLowerLeg" },
+	{ kind = "remote", shape = "session", part = "Head", third = "table", multi = "calls", attackArg = false, name = "Session / Head / each target" },
+	{ kind = "remote", shape = "session", part = "Head", third = "table", multi = false, attackArg = false, name = "Session / Head" },
+	{ kind = "activate", multi = false, name = "Tool activate" },
+	{ kind = "click", multi = false, name = "Click input" },
+}
+
+local HIT_ACTIVATE_INDEX = 1
+
+for index, profile in HIT_PROFILES do
+	if profile.kind == "activate" then
+		HIT_ACTIVATE_INDEX = index
+	end
+end
+
+---@param key string
+---@param message string
+function Combat.warnOnce(key, message)
+	if not Combat.warned[key] then
+		Combat.warned[key] = true
+		Logger.warn("Combat", "%s", message)
+	end
+end
+
+---Equip a tool of the configured type. Returns true when one is held.
+---@return boolean
+function Combat.equipWeapon()
+	local model, humanoid = Character.get()
+	if not (model and humanoid) then
+		return false
+	end
+
+	local toolTip = Config.get("weaponType")
+
+	for _, child in model:GetChildren() do
+		if child:IsA("Tool") and child.ToolTip == toolTip then
+			return true
+		end
+	end
+
+	local backpack = localPlayer:FindFirstChild("Backpack")
+	if not backpack then
+		return false
+	end
+
+	for _, tool in backpack:GetChildren() do
+		if tool:IsA("Tool") and tool.ToolTip == toolTip then
+			humanoid:EquipTool(tool)
+			task.wait(0.15)
+			return tool.Parent == model
+		end
+	end
+
+	return false
+end
+
+---Send one primary click using the configured input method.
+function Combat.click()
+	if Config.get("inputMethod") == "Mouse" then
+		if Dependencies.has("mouse1click") and (not Dependencies.has("isrbxactive") or isrbxactive()) then
+			mouse1click()
+			return
+		end
+
+		Combat.warnOnce("mouse", "Mouse input needs mouse1click and a focused window, using VirtualUser")
+	end
+
+	local camera = workspace.CurrentCamera
+	local cameraCFrame = camera and camera.CFrame or CFrame.new()
+	local position = Vector2.new(851, 158)
+
+	virtualUser:CaptureController()
+	virtualUser:Button1Down(position, cameraCFrame)
+	task.wait(0.03)
+	virtualUser:Button1Up(position, cameraCFrame)
+end
+
+---Find a combat remote in the net module, falling back to a scan of ReplicatedStorage.
+---@param remoteName string
+---@return RemoteEvent?
+function Combat.findRemote(remoteName)
+	local modules = replicatedStorage:FindFirstChild("Modules")
+	local net = modules and modules:FindFirstChild("Net")
+	local direct = net and net:FindFirstChild(remoteName)
+
+	if direct and direct:IsA("RemoteEvent") then
+		return direct
+	end
+
+	local shortName = string.match(remoteName, "[^/]+$")
+
+	for _, descendant in replicatedStorage:GetDescendants() do
+		if descendant:IsA("RemoteEvent") and (descendant.Name == remoteName or descendant.Name == shortName) then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+---Resolve both combat remotes. Scans are throttled so a missing remote cannot cause lag.
+---@param force boolean?
+---@return RemoteEvent?, RemoteEvent?
+function Combat.resolveRemotes(force)
+	local remotes = Combat.remotes
+	local attackReady = remotes.attack and remotes.attack.Parent
+	local hitReady = remotes.hit and remotes.hit.Parent
+
+	if not (attackReady and hitReady) and (force or os.clock() - Combat.lastScan > 5) then
+		Combat.lastScan = os.clock()
+
+		if not attackReady then
+			remotes.attack = Combat.findRemote("RE/RegisterAttack")
+		end
+
+		if not hitReady then
+			remotes.hit = Combat.findRemote("RE/RegisterHit")
+		end
+	end
+
+	return remotes.attack, remotes.hit
+end
+
+---Build the combat session value the game's own hit sender uses. Never logged.
+---@return string?
+function Combat.sessionId()
+	if Combat.sessionValue and os.clock() - Combat.sessionStamp < 5 then
+		return Combat.sessionValue
+	end
+
+	local success, result = pcall(function()
+		local sendHits = getrenv()._G.SendHitsToServer
+		if type(sendHits) ~= "function" then
+			error("_G.SendHitsToServer is not a function")
+		end
+
+		local upvalues = debug.getupvalues(sendHits)
+		local combatThread = nil
+
+		for _, upvalue in upvalues do
+			if type(upvalue) == "thread" then
+				combatThread = upvalue
+				break
+			end
+		end
+
+		combatThread = combatThread or upvalues[1]
+		if combatThread == nil then
+			error("combat thread upvalue not found")
+		end
+
+		return string.sub(tostring(localPlayer.UserId), 2, 4) .. string.sub(tostring(combatThread), 11, 15)
+	end)
+
+	Combat.sessionStamp = os.clock()
+
+	if success then
+		Combat.sessionValue = result
+		return result
+	end
+
+	Combat.sessionValue = nil
+	Combat.warnOnce("session", "Hit session value unavailable: " .. firstLine(result))
+	return nil
+end
+
+---Whether the configured hit method allows a profile.
+---@param index number
+---@return boolean
+function Combat.profileAllowed(index)
+	local profile = HIT_PROFILES[index]
+	local method = Config.get("hitMethod")
+
+	if profile.multi and not Config.get("multiHit") then
+		return false
+	end
+
+	if method == "Remote" then
+		return profile.kind == "remote"
+	end
+
+	if method == "Click" then
+		return profile.kind == "click" or profile.kind == "activate"
+	end
+
+	return true
+end
+
+---Select a profile and reset every per-profile counter.
+---@param index number
+function Combat.setProfile(index)
+	Combat.profileIndex = index
+	Combat.noDamageBursts = 0
+	Combat.multiMisses = 0
+	Combat.multiConfirmed = false
+end
+
+---The profile currently in use, choosing a valid one when needed.
+---@return table
+function Combat.currentProfile()
+	if Combat.profileIndex and Combat.profileAllowed(Combat.profileIndex) then
+		return HIT_PROFILES[Combat.profileIndex]
+	end
+
+	local savedName = Config.get("hitProfileName")
+	local saved = nil
+
+	for index, candidate in HIT_PROFILES do
+		if candidate.name == savedName then
+			saved = index
+		end
+	end
+
+	local chosen = nil
+
+	if saved and Combat.profileAllowed(saved) then
+		chosen = saved
+	else
+		for index = 1, #HIT_PROFILES do
+			if Combat.profileAllowed(index) then
+				chosen = index
+				break
+			end
+		end
+	end
+
+	Combat.setProfile(chosen or #HIT_PROFILES)
+	return HIT_PROFILES[Combat.profileIndex]
+end
+
+---Activate the equipped tool, the game's own input path.
+---@return boolean, string?
+function Combat.activate()
+	local model = Character.get()
+	if not model then
+		return false, "no character"
+	end
+
+	for _, child in model:GetChildren() do
+		if child:IsA("Tool") and child.ToolTip == Config.get("weaponType") then
+			child:Activate()
+			return true, nil
+		end
+	end
+
+	return false, "no equipped tool to activate"
+end
+
+---Pick the targets for one attack tick. The nearest half of the budget always goes to the closest
+---mobs, the rest rotates over the pile so a pile bigger than the limit is still hit evenly.
+---@param target Model
+---@param pile table
+---@param limit number
+---@return table
+function Combat.batch(target, pile, limit)
+	local batch = { target }
+	local count = #pile
+
+	if count == 0 then
+		return batch
+	end
+
+	local seen = { [target] = true }
+	local nearBudget = math.max(1, math.ceil(limit / 2))
+
+	for _, enemy in pile do
+		if #batch >= nearBudget then
+			break
+		end
+
+		if not seen[enemy] and Enemies.isAlive(enemy) then
+			seen[enemy] = true
+			table.insert(batch, enemy)
+		end
+	end
+
+	Combat.cursor = Combat.cursor % count + 1
+	local index = Combat.cursor
+
+	for _ = 1, count do
+		if #batch >= limit then
+			break
+		end
+
+		local enemy = pile[index]
+
+		if not seen[enemy] and Enemies.isAlive(enemy) then
+			seen[enemy] = true
+			table.insert(batch, enemy)
+		end
+
+		index = index % count + 1
+	end
+
+	return batch
+end
+
+---Send one attack tick with the current profile. Returns true, or false plus a reason.
+---@param target Model
+---@param pile table?
+---@return boolean, string?
+function Combat.attack(target, pile)
+	local profile = Combat.currentProfile()
+
+	if profile.kind == "activate" then
+		Combat.hitsSent += 1
+		return Combat.activate()
+	end
+
+	if profile.kind == "click" then
+		Combat.hitsSent += 1
+		Combat.click()
+		return true, nil
+	end
+
+	local attackRemote, hitRemote = Combat.resolveRemotes()
+
+	if not (attackRemote and hitRemote) then
+		if Config.get("hitMethod") == "Auto" then
+			Combat.warnOnce("noremotes", "Combat remotes not found, using tool input instead")
+			Combat.setProfile(HIT_ACTIVATE_INDEX)
+			return Combat.activate()
+		end
+
+		return false, "combat remotes not found"
+	end
+
+	-- The game's own M1 start, which the public hubs trigger before the remote hits.
+	if os.clock() - Combat.lastActivate >= ACTIVATE_INTERVAL then
+		Combat.lastActivate = os.clock()
+		Combat.activate()
+	end
+
+	local batch = { target }
+
+	if profile.multi and pile then
+		batch = Combat.batch(target, pile, Config.get("maxTargets"))
+	end
+
+	local session = profile.shape == "session" and Combat.sessionId() or nil
+
+	local success, errorMessage = pcall(function()
+		if profile.attackArg == false then
+			attackRemote:FireServer()
+		else
+			attackRemote:FireServer(profile.attackArg)
+		end
+
+		if profile.multi == "list" then
+			local list = {}
+
+			for _, enemy in batch do
+				local enemyPart = enemy:FindFirstChild(profile.part) or enemy:FindFirstChild("HumanoidRootPart")
+
+				if enemyPart then
+					table.insert(list, { enemy, enemyPart })
+				end
+			end
+
+			if #list > 0 then
+				hitRemote:FireServer(list[1][2], list)
+			end
+
+			return
+		end
+
+		for _, enemy in batch do
+			local enemyPart = enemy:FindFirstChild(profile.part) or enemy:FindFirstChild("HumanoidRootPart")
+
+			if enemyPart then
+				if profile.shape == "pair" then
+					hitRemote:FireServer(enemyPart, { { enemy, enemyPart } })
+				elseif profile.third == "table" then
+					hitRemote:FireServer(enemyPart, {}, {}, session)
+				else
+					hitRemote:FireServer(enemyPart, {}, nil, session)
+				end
+			end
+		end
+	end)
+
+	if not success then
+		return false, firstLine(errorMessage)
+	end
+
+	Combat.hitsSent += #batch
+	return true, nil
+end
+
+---The hover height in use: the setting, or a lower value learned when hits stopped landing.
+---@return number
+function Combat.effectiveHover()
+	local configured = Config.get("hoverHeight")
+
+	if Combat.hoverCap and Combat.hoverCap < configured then
+		return Combat.hoverCap
+	end
+
+	return configured
+end
+
+---Called after a burst with no damage. Moves the hover closer before the hit profile is blamed.
+---Returns true while it is still handling the problem.
+---@return boolean
+function Combat.cutHover()
+	local current = Combat.effectiveHover()
+	local floor = math.max(HOVER_FLOOR, Combat.verifiedHover or 0)
+
+	-- A height that already dealt damage once is known to be in reach.
+	if current <= floor then
+		Combat.hoverMisses = 0
+		return false
+	end
+
+	Combat.hoverMisses += 1
+
+	if Combat.hoverMisses < 2 then
+		return true
+	end
+
+	Combat.hoverMisses = 0
+
+	local nextHover = math.max(floor, math.floor(current * 0.6))
+	Combat.hoverCap = nextHover
+	Combat.hoverCapAt = os.clock()
+	Logger.warn("Combat", "No damage from %d studs up, moving closer to %d", math.floor(current), nextHover)
+	return true
+end
+
+---Slowly test a higher hover again after the limit was lowered.
+function Combat.growHover()
+	local configured = Config.get("hoverHeight")
+
+	if not Combat.hoverCap or Combat.hoverCap >= configured then
+		return
+	end
+
+	if os.clock() - Combat.hoverCapAt < HOVER_GROW_INTERVAL then
+		return
+	end
+
+	local grown = math.min(configured, math.ceil(Combat.hoverCap * 1.3))
+	Combat.hoverCapAt = os.clock()
+	Combat.hoverCap = grown < configured and grown or nil
+	Logger.info("Combat", "Damage is landing, trying a %d stud hover", grown)
+end
+
+---Record that the current profile dealt damage.
+function Combat.reportDamage()
+	Combat.noDamageBursts = 0
+	Combat.failedProfiles = 0
+
+	if Combat.profileIndex and Combat.verifiedIndex ~= Combat.profileIndex then
+		Combat.verifiedIndex = Combat.profileIndex
+		Logger.info("Combat", "Hit profile works: %s", HIT_PROFILES[Combat.profileIndex].name)
+		Config.set("hitProfileName", HIT_PROFILES[Combat.profileIndex].name)
+	end
+end
+
+---Record a burst without damage. Returns "waiting", "advanced" or "exhausted".
+---@return string
+function Combat.reportNoDamage()
+	Combat.currentProfile()
+	Combat.noDamageBursts += 1
+
+	-- A profile that worked before gets more patience, mobs can be briefly invulnerable.
+	local patience = Combat.verifiedIndex == Combat.profileIndex and NO_DAMAGE_BURSTS * 3 or NO_DAMAGE_BURSTS
+	if Combat.noDamageBursts < patience then
+		return "waiting"
+	end
+
+	Combat.noDamageBursts = 0
+	Combat.failedProfiles += 1
+
+	local allowed, nextIndex = 0, nil
+	local count = #HIT_PROFILES
+
+	for index = 1, count do
+		if Combat.profileAllowed(index) then
+			allowed += 1
+		end
+	end
+
+	for step = 1, count do
+		local candidate = (Combat.profileIndex + step - 1) % count + 1
+
+		if candidate ~= Combat.profileIndex and Combat.profileAllowed(candidate) then
+			nextIndex = candidate
+			break
+		end
+	end
+
+	if Combat.failedProfiles >= allowed or not nextIndex then
+		Combat.failedProfiles = 0
+		return "exhausted"
+	end
+
+	Combat.setProfile(nextIndex)
+	Logger.warn("Combat", "No damage registered, trying hit profile: %s", HIT_PROFILES[nextIndex].name)
+	return "advanced"
+end
+
+---Step a pile profile down a tier when only the primary target takes damage: "calls" falls back to
+---"list", and "list" falls back to single-target hits.
+function Combat.downgradeMulti()
+	local profile = HIT_PROFILES[Combat.profileIndex]
+	local wanted = profile.multi == "calls" and "list" or false
+	local fallback = nil
+	local chosen = nil
+
+	for index, candidate in HIT_PROFILES do
+		local sameFamily = candidate.kind == "remote"
+			and candidate.shape == profile.shape
+			and candidate.part == profile.part
+			and candidate.third == profile.third
+
+		if sameFamily and candidate.multi == wanted then
+			chosen = index
+		elseif sameFamily and candidate.multi == false then
+			fallback = index
+		end
+	end
+
+	chosen = chosen or fallback
+
+	if chosen then
+		Logger.warn("Combat", "Only the primary target took damage, switching to %s", HIT_PROFILES[chosen].name)
+		Combat.setProfile(chosen)
+		Combat.verifiedIndex = chosen
+		Config.set("hitProfileName", HIT_PROFILES[chosen].name)
+	end
+end
+
+---Fold one burst into the profile state. Returns "ok", or the no-damage verdict.
+---@param damaged boolean
+---@param othersDamaged boolean
+---@param pileSize number
+---@return string
+function Combat.reportBurst(damaged, othersDamaged, pileSize)
+	if not damaged then
+		return Combat.reportNoDamage()
+	end
+
+	Combat.reportDamage()
+
+	local profile = HIT_PROFILES[Combat.profileIndex]
+
+	if profile and profile.multi and pileSize >= 2 and not Combat.multiConfirmed then
+		if othersDamaged then
+			Combat.multiConfirmed = true
+			Combat.multiMisses = 0
+			Logger.info("Combat", "Pile hits confirmed (%d mobs in the burst)", pileSize)
+		else
+			Combat.multiMisses += 1
+
+			if Combat.multiMisses >= MULTI_CHECK_BURSTS then
+				Combat.downgradeMulti()
+			end
+		end
+	end
+
+	return "ok"
+end
+
+---One-line combat status for the dashboard.
+---@return string
+function Combat.statusText()
+	local profile = Combat.currentProfile()
+	local attackRemote, hitRemote = Combat.resolveRemotes()
+	local verified = Combat.verifiedIndex == Combat.profileIndex and "verified" or "not verified yet"
+	local remotes = (attackRemote and hitRemote) and "remotes found" or "remotes missing"
+
+	local now = os.clock()
+	if now - Combat.rateSampleAt >= 1 then
+		Combat.rate = (Combat.hitsSent - Combat.rateSampleCount) / (now - Combat.rateSampleAt)
+		Combat.rateSampleAt, Combat.rateSampleCount = now, Combat.hitsSent
+	end
+
+	return string.format("%s  -  %s  -  %s  -  %d hits/s", profile.name, verified, remotes, math.floor(Combat.rate))
+end
+
+--------------------------------------------------------------------------------
+-- Auto Farm state machine.
+--
+-- Allowed transitions (anything else is logged as an error and sent to RECOVERING):
+--   INITIALIZING        -> CHECKING_CHARACTER, RECOVERING, PAUSED, STOPPED
+--   CHECKING_CHARACTER  -> SELECTING_QUEST, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   SELECTING_QUEST     -> VERIFYING_QUEST, FINDING_TARGET, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   VERIFYING_QUEST     -> FINDING_TARGET, NAVIGATING, EXECUTING_ACTION, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   FINDING_TARGET      -> SELECTING_QUEST, NAVIGATING, EXECUTING_ACTION, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   NAVIGATING          -> VERIFYING_QUEST, FINDING_TARGET, EXECUTING_ACTION, CHECKING_CHARACTER,
+--                          WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   EXECUTING_ACTION    -> VERIFYING_QUEST, VERIFYING_PROGRESS, NAVIGATING, WAITING_FOR_RESPAWN,
+--                          RECOVERING, PAUSED, STOPPED
+--   VERIFYING_PROGRESS  -> EXECUTING_ACTION, FINDING_TARGET, WAITING_FOR_RESPAWN, RECOVERING, PAUSED, STOPPED
+--   WAITING_FOR_RESPAWN -> CHECKING_CHARACTER, RECOVERING, PAUSED, STOPPED
+--   RECOVERING          -> CHECKING_CHARACTER, PAUSED, STOPPED
+--   PAUSED              -> CHECKING_CHARACTER, STOPPED
+--   STOPPED             -> INITIALIZING
+--------------------------------------------------------------------------------
+
+local STATES = {
+	INITIALIZING = "INITIALIZING",
+	CHECKING_CHARACTER = "CHECKING_CHARACTER",
+	SELECTING_QUEST = "SELECTING_QUEST",
+	VERIFYING_QUEST = "VERIFYING_QUEST",
+	FINDING_TARGET = "FINDING_TARGET",
+	NAVIGATING = "NAVIGATING",
+	EXECUTING_ACTION = "EXECUTING_ACTION",
+	VERIFYING_PROGRESS = "VERIFYING_PROGRESS",
+	WAITING_FOR_RESPAWN = "WAITING_FOR_RESPAWN",
+	RECOVERING = "RECOVERING",
+	PAUSED = "PAUSED",
+	STOPPED = "STOPPED",
+}
+
+local TRANSITION_LISTS = {
+	INITIALIZING = { "CHECKING_CHARACTER", "RECOVERING", "PAUSED", "STOPPED" },
+	CHECKING_CHARACTER = { "SELECTING_QUEST", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	SELECTING_QUEST = { "VERIFYING_QUEST", "FINDING_TARGET", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	VERIFYING_QUEST = { "FINDING_TARGET", "NAVIGATING", "EXECUTING_ACTION", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	FINDING_TARGET = { "SELECTING_QUEST", "NAVIGATING", "EXECUTING_ACTION", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	NAVIGATING = { "VERIFYING_QUEST", "FINDING_TARGET", "EXECUTING_ACTION", "CHECKING_CHARACTER", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	EXECUTING_ACTION = { "VERIFYING_QUEST", "VERIFYING_PROGRESS", "NAVIGATING", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	VERIFYING_PROGRESS = { "EXECUTING_ACTION", "FINDING_TARGET", "WAITING_FOR_RESPAWN", "RECOVERING", "PAUSED", "STOPPED" },
+	WAITING_FOR_RESPAWN = { "CHECKING_CHARACTER", "RECOVERING", "PAUSED", "STOPPED" },
+	RECOVERING = { "CHECKING_CHARACTER", "PAUSED", "STOPPED" },
+	PAUSED = { "CHECKING_CHARACTER", "STOPPED" },
+	STOPPED = { "INITIALIZING" },
+}
+
+local ALLOWED = {}
+
+for from, targets in TRANSITION_LISTS do
+	ALLOWED[from] = {}
+
+	for _, target in targets do
+		ALLOWED[from][target] = true
+	end
+end
+
+-- Routine combat-loop edges are not logged, they would flood the log every second.
+local QUIET_EDGES = {
+	["EXECUTING_ACTION>VERIFYING_PROGRESS"] = true,
+	["VERIFYING_PROGRESS>EXECUTING_ACTION"] = true,
+	["FINDING_TARGET>EXECUTING_ACTION"] = true,
+	["VERIFYING_PROGRESS>FINDING_TARGET"] = true,
+}
+
+local Farm = {
+	state = STATES.STOPPED,
+	reason = "not started",
+	stateSince = os.clock(),
+	running = false,
+	paused = false,
+	token = 0,
+	context = {},
+	stats = { kills = 0, startedAt = os.clock() },
+	changed = Signal.new(),
+}
+
+local HANDLERS = {}
+
+---@return table
+local function newContext()
+	return {
+		quest = nil,
+		target = nil,
+		action = ACTION_ATTACK,
+		navGoal = nil,
+		navNext = nil,
+		navLabel = nil,
+		navEntrance = nil,
+		entranceAttempts = 0,
+		enterAttempts = 0,
+		capNoted = false,
+		questAttempts = 0,
+		questBlockedUntil = 0,
+		lastProgressAt = os.clock(),
+		pilePoint = nil,
+		pileCount = 0,
+		burst = nil,
+		bringStalls = 0,
+		bringBlockedUntil = 0,
+		recoveries = 0,
+		retreatCooldownUntil = 0,
+		noTargetSince = nil,
+		busySince = nil,
+		equipFailures = 0,
+		warnedQuestUi = false,
+	}
+end
+
+---True when this run was stopped or replaced.
+---@param token number
+---@return boolean
+function Farm.cancelled(token)
+	return Farm.token ~= token or not Farm.running
+end
+
+---Sleep in small steps so cancellation is honoured. Returns false when cancelled.
+---@param seconds number
+---@param token number
+---@return boolean
+function Farm.sleep(seconds, token)
+	local deadline = os.clock() + seconds
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return false
+		end
+
+		task.wait(0.1)
+	end
+
+	return not Farm.cancelled(token)
+end
+
+---Move to a new state, enforcing the documented transition table.
+---@param newState string
+---@param reason string?
+function Farm.transition(newState, reason)
+	local old = Farm.state
+
+	if not (ALLOWED[old] and ALLOWED[old][newState]) then
+		Logger.error("State", "Invalid transition %s -> %s (%s)", old, newState, tostring(reason))
+		newState = ALLOWED[old] and ALLOWED[old][STATES.RECOVERING] and STATES.RECOVERING or STATES.STOPPED
+		reason = "invalid transition"
+	end
+
+	Farm.state = newState
+	Farm.reason = reason or ""
+	Farm.stateSince = os.clock()
+
+	if not QUIET_EDGES[old .. ">" .. newState] then
+		Logger.info("State", "%s -> %s (%s)", old, newState, Farm.reason)
+	end
+
+	Farm.changed:fire(newState, Farm.reason)
+end
+
+---Start the controller.
+---@return boolean
+function Farm.start()
+	if Farm.running then
+		return false
+	end
+
+	Farm.running = true
+	Farm.paused = false
+	Farm.token += 1
+	Farm.context = newContext()
+	Farm.stats = { kills = 0, startedAt = os.clock() }
+
+	if Config.get("bringMobs") then
+		Bring.start()
+	end
+
+	Farm.transition(STATES.INITIALIZING, "start requested")
+	task.spawn(Farm.run, Farm.token)
+	return true
+end
+
+---Stop the controller and release everything it holds.
+---@param reason string?
+function Farm.stop(reason)
+	if not Farm.running then
+		return
+	end
+
+	Farm.running = false
+	Farm.paused = false
+	Farm.token += 1
+	Movement.cancel()
+	Bring.stop()
+	Farm.transition(STATES.STOPPED, reason or "stopped by user")
+end
+
+---Stop because of an unrecoverable problem.
+---@param reason string
+function Farm.fail(reason)
+	Notify.push("Auto Farm stopped: " .. reason, "ERROR")
+	Farm.stop(reason)
+end
+
+---@return boolean
+function Farm.pause()
+	if not Farm.running or Farm.paused then
+		return false
+	end
+
+	Farm.paused = true
+	Movement.cancel("farm")
+	return true
+end
+
+---@return boolean
+function Farm.resume()
+	if not Farm.running or not Farm.paused then
+		return false
+	end
+
+	Farm.paused = false
+	return true
+end
+
+---Main loop. One handler runs per iteration.
+---@param token number
+function Farm.run(token)
+	while not Farm.cancelled(token) do
+		if Farm.paused and Farm.state ~= STATES.PAUSED then
+			Farm.transition(STATES.PAUSED, "pause requested")
+		end
+
+		local handler = HANDLERS[Farm.state]
+		if not handler then
+			Farm.fail("No handler for state " .. tostring(Farm.state))
+			break
+		end
+
+		local success, nextState, reason = xpcall(handler, function(errorMessage)
+			return debug.traceback(tostring(errorMessage), 2)
+		end, Farm.context, token)
+
+		if Farm.cancelled(token) then
+			break
+		end
+
+		if not success then
+			Logger.error("Farm", "Handler %s failed: %s", Farm.state, firstLine(nextState))
+			nextState, reason = STATES.RECOVERING, "handler error"
+		end
+
+		if nextState and nextState ~= Farm.state then
+			Farm.transition(nextState, reason)
+		end
+
+		task.wait()
+	end
+end
+
+---Human-readable description of the current task.
+---@return string
+function Farm.taskText()
+	local state, context = Farm.state, Farm.context
+
+	if state == STATES.STOPPED then
+		return "Idle"
+	end
+
+	if state == STATES.PAUSED then
+		return "Paused"
+	end
+
+	if state == STATES.NAVIGATING then
+		return "Travelling to " .. tostring(context.navLabel or "destination")
+	end
+
+	if state == STATES.EXECUTING_ACTION then
+		if context.action == ACTION_ACCEPT then
+			return "Accepting quest"
+		end
+
+		if context.action == ACTION_ENTER then
+			return "Entering Submerged Island"
+		end
+
+		return "Attacking " .. (context.target and context.target.Name or "target")
+	end
+
+	if state == STATES.FINDING_TARGET then
+		if context.noTargetSince then
+			return "Waiting for mobs to spawn"
+		end
+
+		return "Looking for " .. (context.quest and context.quest.mob or "a target")
+	end
+
+	return string.lower((string.gsub(state, "_", " ")))
+end
+
+---Kills per minute for this session.
+---@return number
+function Farm.killsPerMinute()
+	local minutes = (os.clock() - Farm.stats.startedAt) / 60
+	return Farm.stats.kills / math.max(minutes, 1 / 60)
+end
+
+---Set a navigation goal and enter the NAVIGATING state.
+---@param context table
+---@param goal CFrame
+---@param nextState string
+---@param label string
+---@param entrance Vector3?
+---@return string, string
+function Farm.navigate(context, goal, nextState, label, entrance)
+	context.navGoal = goal
+	context.navNext = nextState
+	context.navLabel = label
+	context.navEntrance = entrance
+	context.entranceAttempts = 0
+	return STATES.NAVIGATING, "heading to " .. label
+end
+
+---Move up and wait for health to recover. Anchoring is always restored.
+---@param token number
+---@return boolean
+local function retreat(token)
+	local _, _, root = Character.get()
+	if not root then
+		return false
+	end
+
+	local safeCFrame = CFrame.new(root.Position + Vector3.new(0, RETREAT_HEIGHT, 0))
+	local arrived = Movement.moveTo("farm", safeCFrame, function()
+		return Farm.cancelled(token) or Farm.paused
+	end)
+
+	local _, _, current = Character.get()
+	if not (arrived and current) then
+		return false
+	end
+
+	local wasAnchored = current.Anchored
+	current.Anchored = true
+
+	local startedAt = os.clock()
+	local recovered = false
+
+	while not Farm.cancelled(token) and not Farm.paused and os.clock() - startedAt < RETREAT_TIMEOUT do
+		local percent = Character.healthPercent()
+		if not percent then
+			break
+		end
+
+		if percent >= RESUME_PERCENT then
+			recovered = true
+			break
+		end
+
+		task.wait(0.5)
+	end
+
+	current.Anchored = wasAnchored
+	return recovered
+end
+
+HANDLERS[STATES.INITIALIZING] = function(_, token)
+	local deadline = os.clock() + DATA_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		if Progression.level() then
+			return STATES.CHECKING_CHARACTER, "progression data ready"
+		end
+
+		task.wait(0.25)
+	end
+
+	return STATES.RECOVERING, "Data.Level not found"
+end
+
+HANDLERS[STATES.CHECKING_CHARACTER] = function(context)
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "no live character"
+	end
+
+	local percent = Character.healthPercent()
+	local threshold = Config.get("retreatPercent")
+
+	if threshold > 0 and percent and percent < threshold and os.clock() >= context.retreatCooldownUntil then
+		return STATES.RECOVERING, LOW_HEALTH
+	end
+
+	return STATES.SELECTING_QUEST, "character ready"
+end
+
+HANDLERS[STATES.SELECTING_QUEST] = function(context)
+	local level = Progression.level()
+	if not level then
+		return STATES.RECOVERING, "level unreadable"
+	end
+
+	local stopLevel = Config.get("stopAtLevel")
+	if stopLevel > 0 and level >= stopLevel then
+		Notify.push(string.format("Reached level %d, Auto Farm stopped", math.floor(level)), "INFO")
+		Farm.stop("level target reached")
+		return nil
+	end
+
+	if level >= XP_CAP_LEVEL and not context.capNoted then
+		context.capNoted = true
+		Logger.info("Farm", "Quests stop giving XP at level %d, farming continues for drops", XP_CAP_LEVEL)
+	end
+
+	local quest, problem = Quests.select(level)
+	if not quest then
+		Farm.fail(problem or "no quest available")
+		return nil
+	end
+
+	if not context.quest or context.quest.name ~= quest.name or context.quest.index ~= quest.index then
+		Logger.info("Farm", "Selected %s #%d for %s (level %d)", quest.name, quest.index, quest.mob, level)
+		context.questAttempts = 0
+		context.pilePoint = nil
+	end
+
+	context.quest = quest
+	context.target = nil
+
+	if Config.get("autoQuest") and os.clock() >= context.questBlockedUntil then
+		return STATES.VERIFYING_QUEST, "checking quest"
+	end
+
+	return STATES.FINDING_TARGET, "farming without quest"
+end
+
+HANDLERS[STATES.VERIFYING_QUEST] = function(context)
+	local quest = context.quest
+	local active, problem = Quests.isActiveFor(quest)
+
+	if active then
+		context.questAttempts = 0
+		context.recoveries = 0
+		return STATES.FINDING_TARGET, "quest active"
+	end
+
+	if problem then
+		if not context.warnedQuestUi then
+			context.warnedQuestUi = true
+			Logger.warn("Quests", "%s, farming without quest for %ds", problem, QUEST_BLOCK_TIME)
+		end
+
+		context.questBlockedUntil = os.clock() + QUEST_BLOCK_TIME
+		return STATES.FINDING_TARGET, "cannot verify quests"
+	end
+
+	if context.questAttempts >= QUEST_MAX_ATTEMPTS then
+		context.questBlockedUntil = os.clock() + QUEST_BLOCK_TIME
+		context.questAttempts = 0
+		Notify.push(string.format("Quest %s was not accepted, farming without it", quest.name), "WARN")
+		return STATES.FINDING_TARGET, "quest not accepted"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	-- Submerged Island quests need the submarine first.
+	if quest.entry == "submerged" then
+		if Entrances.inSubmerged() then
+			context.enterAttempts = 0
+		else
+			if context.enterAttempts >= QUEST_MAX_ATTEMPTS then
+				context.enterAttempts = 0
+				return STATES.RECOVERING, "could not enter Submerged Island"
+			end
+
+			if (root.Position - SUBMARINE_PORT).Magnitude > QUEST_REACH then
+				return Farm.navigate(context, CFrame.new(SUBMARINE_PORT + Vector3.new(0, 3, 0)), STATES.VERIFYING_QUEST, "the submarine port", nil)
+			end
+
+			context.action = ACTION_ENTER
+			return STATES.EXECUTING_ACTION, "entering Submerged Island"
+		end
+	end
+
+	if quest.npcPosition and (root.Position - quest.npcPosition).Magnitude > QUEST_REACH then
+		return Farm.navigate(context, CFrame.new(quest.npcPosition + Vector3.new(0, 3, 0)), STATES.VERIFYING_QUEST, "the quest NPC", quest.entrance)
+	end
+
+	context.action = ACTION_ACCEPT
+	return STATES.EXECUTING_ACTION, "accepting quest"
+end
+
+HANDLERS[STATES.FINDING_TARGET] = function(context, token)
+	local quest = context.quest
+
+	if Config.get("autoQuest") and os.clock() >= context.questBlockedUntil then
+		local active = Quests.isActiveFor(quest)
+		if not active then
+			return STATES.SELECTING_QUEST, "quest not active"
+		end
+	end
+
+	local level = Progression.level()
+	local latest = level and Quests.select(level)
+	if latest and (latest.name ~= quest.name or latest.index ~= quest.index) then
+		return STATES.SELECTING_QUEST, "level unlocked a new quest"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	local target = Enemies.nearest(quest.mob, root.Position)
+	if target then
+		context.target = target
+		context.action = ACTION_ATTACK
+		context.lastProgressAt = os.clock()
+		context.noTargetSince = nil
+		context.equipFailures = 0
+		return STATES.EXECUTING_ACTION, "target " .. target.Name
+	end
+
+	context.noTargetSince = context.noTargetSince or os.clock()
+	if os.clock() - context.noTargetSince > NO_TARGET_TIMEOUT then
+		context.noTargetSince = nil
+		return STATES.RECOVERING, "no target found for " .. NO_TARGET_TIMEOUT .. "s"
+	end
+
+	local camp = Enemies.campPosition(quest, root.Position)
+	if camp and (root.Position - camp).Magnitude > CAMP_RADIUS then
+		return Farm.navigate(context, CFrame.new(camp + Vector3.new(0, 4, 0)), STATES.FINDING_TARGET, quest.mob .. " camp", quest.entrance)
+	end
+
+	Farm.sleep(0.25, token)
+	return nil
+end
+
+HANDLERS[STATES.NAVIGATING] = function(context, token)
+	local goal = context.navGoal
+	if not goal then
+		return STATES.CHECKING_CHARACTER, "no navigation goal"
+	end
+
+	-- Far islands have a portal command that beats tweening thousands of studs.
+	if context.navEntrance and context.entranceAttempts < ENTRANCE_ATTEMPTS then
+		local _, _, startRoot = Character.get()
+
+		if startRoot and (startRoot.Position - goal.Position).Magnitude > ENTRANCE_DISTANCE then
+			context.entranceAttempts += 1
+			Logger.info("Travel", "Using requestEntrance (%d/%d)", context.entranceAttempts, ENTRANCE_ATTEMPTS)
+			Remotes.invoke("requestEntrance", context.navEntrance)
+			Farm.sleep(2.5, token)
+			return nil
+		end
+	end
+
+	local arrived, why = Movement.moveTo("farm", goal, function()
+		return Farm.cancelled(token) or Farm.paused
+	end)
+
+	if Farm.cancelled(token) then
+		return nil
+	end
+
+	if arrived then
+		context.busySince = nil
+		context.navGoal = nil
+		return context.navNext or STATES.CHECKING_CHARACTER, "arrived"
+	end
+
+	if why == "busy" then
+		context.busySince = context.busySince or os.clock()
+
+		if os.clock() - context.busySince > BUSY_TIMEOUT then
+			context.busySince = nil
+			return STATES.RECOVERING, "movement stayed busy"
+		end
+
+		Farm.sleep(0.5, token)
+		return nil
+	end
+
+	context.busySince = nil
+
+	if why == "character lost" then
+		return STATES.WAITING_FOR_RESPAWN, why
+	end
+
+	if why == "aborted" or why == "cancelled" then
+		return STATES.CHECKING_CHARACTER, "navigation interrupted"
+	end
+
+	return STATES.RECOVERING, "navigation failed: " .. tostring(why)
+end
+
+---Wait for the quest UI to confirm acceptance.
+---@param quest table
+---@param token number
+---@return boolean
+local function waitForQuest(quest, token)
+	local deadline = os.clock() + QUEST_VERIFY_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return false
+		end
+
+		if Quests.isActiveFor(quest) then
+			return true
+		end
+
+		task.wait(0.2)
+	end
+
+	return false
+end
+
+HANDLERS[STATES.EXECUTING_ACTION] = function(context, token)
+	if Movement.owner and Movement.owner ~= "farm" then
+		Farm.sleep(0.25, token)
+		return nil
+	end
+
+	if context.action == ACTION_ENTER then
+		context.enterAttempts += 1
+
+		local remote = Entrances.submarineRemote()
+		if not remote then
+			Logger.error("Quests", "RF/SubmarineWorkerSpeak not found, cannot enter Submerged Island")
+			context.questBlockedUntil = os.clock() + QUEST_BLOCK_TIME
+			return STATES.RECOVERING, "submarine remote missing"
+		end
+
+		local success, result = pcall(remote.InvokeServer, remote, "TravelToSubmergedIsland")
+		if not success then
+			Logger.error("Quests", "Submarine travel failed: %s", firstLine(result))
+		end
+
+		local deadline = os.clock() + 25
+
+		while os.clock() < deadline and not Entrances.inSubmerged() do
+			if Farm.cancelled(token) then
+				return nil
+			end
+
+			task.wait(0.5)
+		end
+
+		return STATES.VERIFYING_QUEST, "checked the Submerged Island entry"
+	end
+
+	if context.action == ACTION_ACCEPT then
+		context.questAttempts += 1
+
+		-- A different active quest blocks acceptance, so drop it first.
+		local activeInfo = Quests.readActive()
+		if activeInfo and activeInfo.visible then
+			Remotes.invoke("AbandonQuest")
+		end
+
+		local success, result = Remotes.invoke("StartQuest", context.quest.name, context.quest.index)
+		if not success then
+			Logger.error("Quests", "StartQuest failed: %s", tostring(result))
+		end
+
+		waitForQuest(context.quest, token)
+		return STATES.VERIFYING_QUEST, "verifying acceptance"
+	end
+
+	local target = context.target
+	if not Enemies.isAlive(target) then
+		return STATES.VERIFYING_PROGRESS, "target gone"
+	end
+
+	local _, _, root = Character.get()
+	if not root then
+		return STATES.WAITING_FOR_RESPAWN, "character lost"
+	end
+
+	local mobName = context.quest.mob
+	local height = Combat.effectiveHover()
+	local range = Config.get("bringRange")
+	local reach = Config.get("hitRange")
+	local bringing = Config.get("bringMobs") and os.clock() >= context.bringBlockedUntil
+	local targetRoot = target.HumanoidRootPart
+
+	-- Where the pile forms. Without bring mobs the character follows the target instead.
+	if bringing and not context.pilePoint then
+		context.pilePoint = targetRoot.Position
+	end
+
+	local anchorPoint = bringing and context.pilePoint or targetRoot.Position
+	local hoverPoint = anchorPoint + Vector3.new(0, height, 0)
+
+	if (root.Position - hoverPoint).Magnitude > HOVER_LEASH then
+		return Farm.navigate(context, CFrame.new(hoverPoint), STATES.EXECUTING_ACTION, target.Name, context.quest.entrance)
+	end
+
+	if not Combat.equipWeapon() then
+		context.equipFailures += 1
+
+		if context.equipFailures >= 3 then
+			context.equipFailures = 0
+			return STATES.RECOVERING, "no " .. Config.get("weaponType") .. " tool could be equipped"
+		end
+
+		Farm.sleep(0.5, token)
+		return nil
+	end
+
+	context.equipFailures = 0
+
+	local pinned = Pile.collect(mobName, anchorPoint, range, target)
+
+	-- Mobs that never follow the pile mean this client does not own them, so stop pinning for a while.
+	if bringing then
+		local owned = Bring.ownedCount(pinned)
+
+		if owned == 0 then
+			context.bringStalls += 1
+		elseif owned then
+			context.bringStalls = 0
+		end
+
+		if context.bringStalls >= BRING_STALL_BURSTS then
+			context.bringStalls = 0
+			context.bringBlockedUntil = os.clock() + BRING_BLOCK_TIME
+			context.pilePoint = nil
+			Logger.warn("Bring", "Mobs are not following the pile, hovering above targets for %ds", BRING_BLOCK_TIME)
+			return nil
+		end
+	end
+
+	-- Every mob of the species inside the hit range can be named in a hit, pinned or not.
+	local reachable, distances = Pile.collect(mobName, hoverPoint, reach, target)
+	local snapshot = Pile.snapshot(reachable)
+	local startPrimary = target
+	local primary = target
+	local interval = 1 / Config.get("attackRate")
+
+	-- Every frame: stay above the pile and keep its members on the pile point.
+	local release = Movement.hold("farm", function()
+		local _, _, currentRoot = Character.get()
+		if not currentRoot then
+			return
+		end
+
+		local point = anchorPoint
+
+		if not bringing then
+			if not Enemies.isAlive(primary) then
+				return
+			end
+
+			point = primary.HumanoidRootPart.Position
+		end
+
+		currentRoot.CFrame = CFrame.new(point + Vector3.new(0, height, 0))
+		currentRoot.AssemblyLinearVelocity = Vector3.zero
+
+		if bringing then
+			Bring.pin(pinned, point)
+		end
+	end)
+
+	if not release then
+		Farm.sleep(0.25, token)
+		return nil
+	end
+
+	local failure = nil
+	local nextRefresh = os.clock() + PILE_REFRESH
+	local endsAt = os.clock() + ACTION_BURST
+
+	while os.clock() < endsAt do
+		if Farm.cancelled(token) or Farm.paused then
+			release()
+			return nil
+		end
+
+		if not Character.get() then
+			release()
+			return STATES.WAITING_FOR_RESPAWN, "character lost"
+		end
+
+		-- Move straight on to the next mob in reach without leaving this state.
+		if not Enemies.isAlive(primary) then
+			primary = Pile.firstAlive(reachable)
+
+			if not primary then
+				break
+			end
+		end
+
+		if os.clock() >= nextRefresh then
+			nextRefresh = os.clock() + PILE_REFRESH
+			pinned = Pile.collect(mobName, anchorPoint, range, primary)
+			reachable, distances = Pile.collect(mobName, hoverPoint, reach, primary)
+			snapshot = Pile.snapshot(reachable, snapshot)
+		end
+
+		local fired, problem = Combat.attack(primary, reachable)
+		if not fired then
+			failure = problem
+			break
+		end
+
+		task.wait(interval)
+	end
+
+	release()
+
+	if failure then
+		Logger.error("Combat", "Attack failed: %s", tostring(failure))
+		Farm.sleep(1, token)
+	end
+
+	local kills = Pile.deaths(snapshot)
+	local before = Farm.stats.kills
+	Farm.stats.kills += kills
+
+	if math.floor(Farm.stats.kills / 10) > math.floor(before / 10) then
+		Logger.info("Farm", "%d kills this session", Farm.stats.kills)
+	end
+
+	-- How far a hit landed, counting only mobs this script was not pulling itself.
+	local pinnedSet = {}
+
+	for _, enemy in pinned do
+		pinnedSet[enemy] = true
+	end
+
+	local ownDistances = {}
+
+	for enemy, distance in distances do
+		if not bringing or not pinnedSet[enemy] then
+			ownDistances[enemy] = distance
+		end
+	end
+
+	local farthest = Pile.farthestDamaged(snapshot, ownDistances)
+	if farthest then
+		Combat.farthestHit = math.max(Combat.farthestHit, farthest)
+	end
+
+	context.target = primary
+	context.pileCount = Pile.count(snapshot)
+	context.burst = {
+		damaged = kills > 0 or Pile.damaged(snapshot, nil),
+		othersDamaged = Pile.damaged(snapshot, startPrimary),
+		pileSize = context.pileCount,
+		hover = height,
+	}
+
+	return STATES.VERIFYING_PROGRESS, "burst complete"
+end
+
+HANDLERS[STATES.VERIFYING_PROGRESS] = function(context)
+	local burst = context.burst
+	context.burst = nil
+
+	if not burst then
+		return STATES.FINDING_TARGET, "no burst data"
+	end
+
+	local threshold = Config.get("retreatPercent")
+	local percent = Character.healthPercent()
+	if threshold > 0 and percent and percent < threshold and os.clock() >= context.retreatCooldownUntil then
+		return STATES.RECOVERING, LOW_HEALTH
+	end
+
+	-- No damage from a high hover usually means the target is out of reach, so move closer first.
+	if not burst.damaged and Combat.cutHover() then
+		context.lastProgressAt = os.clock()
+		return STATES.EXECUTING_ACTION, "moving closer"
+	end
+
+	if burst.damaged then
+		Combat.verifiedHover = burst.hover
+		Combat.growHover()
+	end
+
+	local verdict = Combat.reportBurst(burst.damaged, burst.othersDamaged, burst.pileSize)
+
+	if burst.damaged then
+		context.lastProgressAt = os.clock()
+		context.recoveries = 0
+
+		if Enemies.isAlive(context.target) then
+			return STATES.EXECUTING_ACTION, "damage observed"
+		end
+
+		return STATES.FINDING_TARGET, "pile cleared"
+	end
+
+	if verdict == "advanced" then
+		context.lastProgressAt = os.clock()
+	elseif verdict == "exhausted" then
+		Logger.error("Combat", "No hit profile registered damage. Open Logs and press Diagnose.")
+		return STATES.RECOVERING, "no hit profile registered damage"
+	end
+
+	if os.clock() - context.lastProgressAt > NO_PROGRESS_TIMEOUT then
+		Logger.warn("Combat", "No damage in %ds. Check the weapon type and hover height.", NO_PROGRESS_TIMEOUT)
+		return STATES.RECOVERING, "no damage observed"
+	end
+
+	if not Enemies.isAlive(context.target) then
+		return STATES.FINDING_TARGET, "target gone"
+	end
+
+	return STATES.EXECUTING_ACTION, "no damage yet, retrying"
+end
+
+HANDLERS[STATES.WAITING_FOR_RESPAWN] = function(context, token)
+	Movement.cancel()
+	context.target = nil
+	context.pilePoint = nil
+
+	local deadline = os.clock() + RESPAWN_TIMEOUT
+
+	while os.clock() < deadline do
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		if Character.get() then
+			return STATES.CHECKING_CHARACTER, "character ready"
+		end
+
+		task.wait(0.25)
+	end
+
+	return STATES.RECOVERING, "respawn timed out"
+end
+
+HANDLERS[STATES.RECOVERING] = function(context, token)
+	Movement.cancel()
+	context.target = nil
+	context.pilePoint = nil
+
+	if Farm.reason == LOW_HEALTH then
+		local recovered = retreat(token)
+		if Farm.cancelled(token) then
+			return nil
+		end
+
+		-- Do not retreat again straight away if health never recovered.
+		context.retreatCooldownUntil = os.clock() + (recovered and 10 or 120)
+
+		return STATES.CHECKING_CHARACTER, recovered and "health restored" or "retreat ended"
+	end
+
+	context.recoveries += 1
+
+	if context.recoveries > MAX_RECOVERIES then
+		Farm.fail(string.format("%d consecutive failures (last: %s)", MAX_RECOVERIES, Farm.reason))
+		return nil
+	end
+
+	local delay = math.min(2 * context.recoveries, 10)
+	Logger.warn("Farm", "Recovering %d/%d: %s. Retrying in %ds", context.recoveries, MAX_RECOVERIES, Farm.reason, delay)
+
+	if not Farm.sleep(delay, token) then
+		return nil
+	end
+
+	return STATES.CHECKING_CHARACTER, "retry after recovery"
+end
+
+HANDLERS[STATES.PAUSED] = function(_, token)
+	Farm.sleep(0.2, token)
+
+	if not Farm.paused then
+		return STATES.CHECKING_CHARACTER, "resumed"
+	end
+
+	return nil
+end
+
+HANDLERS[STATES.STOPPED] = function()
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Auxiliary features.
+--------------------------------------------------------------------------------
+
+local COMPAT_LABELS = {
+	VERIFIED = "IMPLEMENTED AND VERIFIED",
+	UNTESTED = "IMPLEMENTED BUT UNTESTED",
+	PARTIAL = "PARTIALLY IMPLEMENTED",
+	UNSUPPORTED = "UNSUPPORTED",
+	DEPENDENCIES = "REQUIRES ADDITIONAL DEPENDENCIES",
+}
+
+local COMPAT_BADGES = {
+	VERIFIED = "VERIFIED",
+	UNTESTED = "UNTESTED",
+	PARTIAL = "PARTIAL",
+	UNSUPPORTED = "UNSUPPORTED",
+	DEPENDENCIES = "NEEDS DEPS",
+}
+
+local Features = { list = {}, byKey = {}, changed = Signal.new() }
+
+-- Shared status values written by loops and read by the dashboard.
+local Status = {
+	tracking = "Target tracking is off",
+	chests = "Chest tracker is off",
+	raid = "Raid status is off",
+	hop = "Idle",
+}
+
+---Run a callback on an interval. Returns a stop function, repeated failures stop the loop.
+---@param name string
+---@param interval number
+---@param callback function
+---@param onFatal function?
+---@return function
+local function startLoop(name, interval, callback, onFatal)
+	local active = true
+
+	task.spawn(function()
+		local failures = 0
+
+		while active do
+			local success, errorMessage = xpcall(callback, function(message)
+				return tostring(message)
+			end)
+
+			if success then
+				failures = 0
+			else
+				failures += 1
+				Logger.error(name, "%s", firstLine(errorMessage))
+
+				if failures >= LOOP_FATAL_ERRORS then
+					active = false
+
+					if onFatal then
+						onFatal(name .. " stopped after repeated errors")
+					end
+
+					break
+				end
+			end
+
+			task.wait(interval)
+		end
+	end)
+
+	return function()
+		active = false
+	end
+end
+
+---@param definition table
+local function defineFeature(definition)
+	definition.maid = Maid.new()
+	definition.enabled = false
+	table.insert(Features.list, definition)
+	Features.byKey[definition.key] = definition
+end
+
+---@param feature table
+---@return boolean
+function Features.isEnabled(feature)
+	if feature.isEnabled then
+		return feature.isEnabled()
+	end
+
+	return feature.enabled
+end
+
+---Report whether a feature can run right now.
+---@param feature table
+---@return boolean, string?
+function Features.available(feature)
+	if feature.compat == "UNSUPPORTED" then
+		return false, feature.note or "Unsupported"
+	end
+
+	if feature.requires then
+		local missing = Dependencies.missing(feature.requires)
+		if #missing > 0 then
+			return false, "Missing executor functions: " .. table.concat(missing, ", ")
+		end
+	end
+
+	return true, nil
+end
+
+---Effective compatibility key, accounting for missing dependencies.
+---@param feature table
+---@return string
+function Features.effectiveCompat(feature)
+	if feature.compat ~= "UNSUPPORTED" and feature.requires and #Dependencies.missing(feature.requires) > 0 then
+		return "DEPENDENCIES"
+	end
+
+	return feature.compat
+end
+
+---@param key string
+---@return string
+function Features.status(key)
+	local feature = Features.byKey[key]
+	if not (feature and Features.isEnabled(feature)) then
+		return "OFF"
+	end
+
+	if key == "AutoFarm" and Farm.paused then
+		return "PAUSED"
+	end
+
+	return "ON"
+end
+
+---Enable or disable a feature through one code path.
+---@param key string
+---@param enabled boolean
+---@return boolean
+function Features.setEnabled(key, enabled)
+	local feature = Features.byKey[key]
+	if not feature then
+		return false
+	end
+
+	if Features.isEnabled(feature) == enabled then
+		return true
+	end
+
+	if enabled then
+		local available, reason = Features.available(feature)
+		if not available then
+			Notify.push(feature.name .. " unavailable: " .. tostring(reason), "WARN")
+			return false
+		end
+
+		feature.enabled = true
+		local success, errorMessage = pcall(feature.start, feature)
+
+		if not success then
+			feature.enabled = false
+			feature.maid:clean()
+			Logger.error("Features", "%s failed to start: %s", feature.name, firstLine(errorMessage))
+			Features.changed:fire(key)
+			return false
+		end
+	else
+		feature.enabled = false
+
+		local success, errorMessage = pcall(feature.stop, feature)
+		if not success then
+			Logger.error("Features", "%s failed to stop cleanly: %s", feature.name, firstLine(errorMessage))
+		end
+
+		feature.maid:clean()
+	end
+
+	Logger.info("Features", "%s %s", feature.name, enabled and "enabled" or "disabled")
+	Features.changed:fire(key)
+	return true
+end
+
+---Disable every feature.
+function Features.stopAll()
+	for _, feature in Features.list do
+		if feature.kind == "toggle" and Features.isEnabled(feature) then
+			Features.setEnabled(feature.key, false)
+		end
+	end
+end
+
+---@param feature table
+---@return function
+local function fatalHandler(feature)
+	return function(message)
+		Notify.push(feature.name .. ": " .. message, "ERROR")
+		task.defer(Features.setEnabled, feature.key, false)
+	end
+end
+
+defineFeature({
+	key = "AutoFarm",
+	name = "Auto Farm",
+	category = "Combat",
+	description = "Takes quests, hovers above mobs, pulls them into one pile and hits them together",
+	compat = "UNTESTED",
+	kind = "toggle",
+	isEnabled = function()
+		return Farm.running
+	end,
+	start = function()
+		if not Farm.start() then
+			error("Auto Farm is already running")
+		end
+	end,
+	stop = function()
+		Farm.stop("stopped by user")
+	end,
+})
+
+defineFeature({
+	key = "TargetTracking",
+	name = "Target Tracking",
+	category = "Combat",
+	description = "Shows the nearest enemy, its health and distance",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("TargetTracking", 0.5, function()
+			local _, _, root = Character.get()
+			if not root then
+				Status.tracking = "No character"
+				return
+			end
+
+			local enemy, distance = Enemies.nearest(nil, root.Position)
+			if not enemy then
+				Status.tracking = "No enemies nearby"
+				return
+			end
+
+			local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+			local health = humanoid and math.floor(humanoid.Health) or 0
+			local maxHealth = humanoid and math.floor(humanoid.MaxHealth) or 0
+			Status.tracking = string.format("%s  %d/%d HP  %d studs", enemy.Name, health, maxHealth, math.floor(distance))
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.tracking = "Target tracking is off"
+	end,
+})
+
+defineFeature({
+	key = "AutoHaki",
+	name = "Auto Haki",
+	category = "Combat",
+	description = "Keeps Buso Haki active through the game's CommF_ remote",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("AutoHaki", 3, function()
+			local model = Character.get()
+			if not model or model:FindFirstChild("HasBuso") then
+				return
+			end
+
+			local success, result = Remotes.invoke("Buso")
+			if not success then
+				error("Buso call failed: " .. tostring(result))
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "AutoStats",
+	name = "Auto Stats",
+	category = "Progression",
+	description = "Spends stat points on the selected stat (Settings)",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		local stalled = 0
+
+		feature.maid:add(startLoop("AutoStats", 2, function()
+			local points = Progression.points()
+			if not points or points <= 0 then
+				stalled = 0
+				return
+			end
+
+			local success, result = Remotes.invoke("AddPoint", Config.get("statTarget"), points)
+			if not success then
+				error("AddPoint failed: " .. tostring(result))
+			end
+
+			task.wait(0.5)
+
+			-- Confirm the points actually went down before trusting the call.
+			local after = Progression.points()
+			if after and after >= points then
+				stalled += 1
+
+				if stalled >= 3 then
+					error("Stat points did not change after 3 attempts")
+				end
+			else
+				stalled = 0
+				Logger.info("Stats", "Spent %d points on %s", points, Config.get("statTarget"))
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "FruitCollect",
+	name = "Fruit Collector",
+	category = "Loot",
+	description = "Travels to dropped fruits and picks them up",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("FruitCollect", 1, function()
+			if Movement.owner then
+				return
+			end
+
+			local _, _, root = Character.get()
+			if not root then
+				return
+			end
+
+			for _, object in workspace:GetChildren() do
+				if not (object:IsA("Tool") and string.find(object.Name, "Fruit", 1, true)) then
+					continue
+				end
+
+				local handle = object:FindFirstChild("Handle")
+				if not handle then
+					continue
+				end
+
+				local arrived = Movement.moveTo("fruit", handle.CFrame + Vector3.new(0, 2, 0))
+				if arrived and Dependencies.has("firetouchinterest") then
+					firetouchinterest(root, handle, 0)
+					firetouchinterest(root, handle, 1)
+				end
+
+				task.wait(1)
+
+				if not object.Parent or object.Parent ~= workspace then
+					Notify.push("Collected " .. object.Name, "INFO")
+				else
+					Logger.warn("Fruit", "%s is still on the ground after reaching it", object.Name)
+				end
+
+				return
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Movement.cancel("fruit")
+	end,
+})
+
+local storedFruits = setmetatable({}, { __mode = "k" })
+
+defineFeature({
+	key = "FruitStore",
+	name = "Fruit Storage",
+	category = "Loot",
+	description = "Stores fruits from your backpack into the fruit inventory",
+	compat = "UNTESTED",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("FruitStore", 2.5, function()
+			local containers = {}
+			local model = Character.get()
+			local backpack = localPlayer:FindFirstChild("Backpack")
+
+			if backpack then
+				table.insert(containers, backpack)
+			end
+
+			if model then
+				table.insert(containers, model)
+			end
+
+			for _, container in containers do
+				for _, tool in container:GetChildren() do
+					if tool:IsA("Tool") and tool:FindFirstChild("EatRemote", true) then
+						local original = tool:GetAttribute("OriginalName")
+						local last = storedFruits[tool]
+
+						if type(original) == "string" and (not last or os.clock() - last > 10) then
+							storedFruits[tool] = os.clock()
+
+							local success, result = Remotes.invoke("StoreFruit", original, tool)
+							if not success then
+								error("StoreFruit failed: " .. tostring(result))
+							end
+
+							Logger.info("Fruit", "Sent %s to storage", original)
+							return
+						end
+					end
+				end
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function() end,
+})
+
+local visitedChests = setmetatable({}, { __mode = "k" })
+
+defineFeature({
+	key = "ChestTracker",
+	name = "Chest Tracker",
+	category = "Loot",
+	description = "Counts tagged chests and collects the nearest one",
+	compat = "PARTIAL",
+	note = "Depends on the _ChestTagged collection tag",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("ChestTracker", 1, function()
+			local chests = collectionService:GetTagged("_ChestTagged")
+			Status.chests = string.format("%d chests tracked", #chests)
+
+			if Movement.owner then
+				return
+			end
+
+			local _, _, root = Character.get()
+			if not root then
+				return
+			end
+
+			local best, bestDistance = nil, math.huge
+
+			for _, chest in chests do
+				local last = visitedChests[chest]
+				if last and os.clock() - last < 60 then
+					continue
+				end
+
+				local distance = (chest:GetPivot().Position - root.Position).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = chest, distance
+				end
+			end
+
+			if not best then
+				return
+			end
+
+			visitedChests[best] = os.clock()
+			Movement.moveTo("chest", best:GetPivot() + Vector3.new(0, 2, 0))
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.chests = "Chest tracker is off"
+		Movement.cancel("chest")
+	end,
+})
+
+defineFeature({
+	key = "RaidStatus",
+	name = "Raid Status",
+	category = "Events",
+	description = "Reads the raid timer from the game's HUD",
+	compat = "PARTIAL",
+	note = "Only the timer is read; bosses and waves are not tracked",
+	kind = "toggle",
+	start = function(feature)
+		feature.maid:add(startLoop("RaidStatus", 1, function()
+			local main = playerGui:FindFirstChild("Main")
+			local hud = main and main:FindFirstChild("TopHUDList")
+			local timer = (hud and hud:FindFirstChild("RaidTimer")) or (main and main:FindFirstChild("Timer"))
+
+			if timer and timer:IsA("TextLabel") and timer.Visible then
+				Status.raid = "Raid timer: " .. timer.Text
+			else
+				Status.raid = "No raid timer visible"
+			end
+		end, fatalHandler(feature)))
+	end,
+	stop = function()
+		Status.raid = "Raid status is off"
+	end,
+})
+
+defineFeature({
+	key = "SeaEvents",
+	name = "Sea Event Status",
+	category = "Events",
+	description = "Sea event tracking",
+	compat = "UNSUPPORTED",
+	note = "No verified data source for sea events",
+	kind = "toggle",
+	start = function() end,
+	stop = function() end,
+})
+
+defineFeature({
+	key = "BossStatus",
+	name = "Boss Status",
+	category = "Events",
+	description = "Boss spawn tracking",
+	compat = "UNSUPPORTED",
+	note = "Boss names and spawn data are not verified",
+	kind = "toggle",
+	start = function() end,
+	stop = function() end,
+})
+
+local Navigation = { selected = 1, busy = false }
+
+---@return table
+function Navigation.list()
+	return ISLANDS[currentSea() or 0] or {}
+end
+
+---@return string
+function Navigation.selectedName()
+	local entry = Navigation.list()[Navigation.selected]
+	return entry and entry[1] or "No destinations"
+end
+
+function Navigation.cycle()
+	local list = Navigation.list()
+	if #list == 0 then
+		return
+	end
+
+	Navigation.selected = Navigation.selected % #list + 1
+end
+
+function Navigation.go()
+	local entry = Navigation.list()[Navigation.selected]
+	if not entry then
+		Notify.push("No navigation data for this place", "WARN")
+		return
+	end
+
+	if Navigation.busy then
+		Notify.push("Already travelling", "WARN")
+		return
+	end
+
+	Navigation.busy = true
+
+	task.spawn(function()
+		local arrived, reason = Movement.moveTo("nav", CFrame.new(entry[2] + Vector3.new(0, 5, 0)))
+		Navigation.busy = false
+
+		if arrived then
+			Notify.push("Arrived at " .. entry[1], "INFO")
+		else
+			Notify.push(string.format("Travel to %s failed: %s", entry[1], tostring(reason)), "WARN")
+		end
+	end)
+end
+
+function Navigation.cancel()
+	Movement.cancel("nav")
+	Navigation.busy = false
+end
+
+defineFeature({
+	key = "Navigation",
+	name = "Navigation",
+	category = "Travel",
+	description = "Travel to saved island positions",
+	compat = "UNTESTED",
+	kind = "navigation",
+	start = function() end,
+	stop = function() end,
+	isEnabled = function()
+		return Navigation.busy
+	end,
+})
+
+local ServerHop = { busy = false }
+
+---Pick a server with free slots and teleport using documented Roblox APIs.
+function ServerHop.perform()
+	local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+	local response = request({ Url = url, Method = "GET" })
+
+	if not (response and response.Success) then
+		error("server list request failed")
+	end
+
+	local decoded = httpService:JSONDecode(response.Body)
+	if type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		error("unexpected server list format")
+	end
+
+	local best = nil
+
+	for _, server in decoded.data do
+		if type(server) == "table"
+			and server.id ~= game.JobId
+			and type(server.playing) == "number"
+			and type(server.maxPlayers) == "number"
+			and server.playing < server.maxPlayers - 1
+			and (not best or server.playing < best.playing)
+		then
+			best = server
+		end
+	end
+
+	if not best then
+		error("no joinable server found")
+	end
+
+	Notify.push(string.format("Joining a server with %d players", best.playing), "INFO")
+	teleportService:TeleportToPlaceInstance(game.PlaceId, best.id, localPlayer)
+end
+
+function ServerHop.run()
+	if ServerHop.busy then
+		return
+	end
+
+	ServerHop.busy = true
+	Status.hop = "Searching for a server"
+
+	task.spawn(function()
+		local success, errorMessage = pcall(ServerHop.perform)
+		ServerHop.busy = false
+		Status.hop = "Idle"
+
+		if not success then
+			Notify.push("Server hop failed: " .. firstLine(errorMessage), "ERROR")
+		end
+	end)
+end
+
+defineFeature({
+	key = "ServerHop",
+	name = "Server Hop",
+	category = "Travel",
+	description = "Teleports to another public server",
+	compat = "PARTIAL",
+	note = "The Third Sea may refuse client-started teleports",
+	requires = { "request" },
+	kind = "action",
+	run = ServerHop.run,
+	start = function() end,
+	stop = function() end,
+	isEnabled = function()
+		return ServerHop.busy
+	end,
+})
+
+--------------------------------------------------------------------------------
+-- Diagnostics.
+--------------------------------------------------------------------------------
+
+local Diagnostics = {}
+
+---Run every dependency and state check, report it in the log, and copy the report.
+---@return number, number
+function Diagnostics.run()
+	local lines = {}
+	local passed, failed = 0, 0
+
+	---@param name string
+	---@param ok boolean
+	---@param detail string?
+	local function check(name, ok, detail)
+		local text = detail and string.format("%s: %s", name, detail) or name
+		table.insert(lines, (ok and "PASS " or "FAIL ") .. text)
+
+		if ok then
+			passed += 1
+			Logger.info("Diag", "PASS %s", text)
+		else
+			failed += 1
+			Logger.warn("Diag", "FAIL %s", text)
+		end
+	end
+
+	local sea = currentSea()
+	check("Supported place", sea ~= nil, string.format("PlaceId %d, sea %s", game.PlaceId, tostring(sea or "unknown, set it in Settings")))
+
+	local model, _, root = Character.get()
+	check("Live character", root ~= nil)
+
+	local location = localPlayer:GetAttribute("CurrentLocation")
+	check("CurrentLocation attribute", location ~= nil, tostring(location))
+
+	local level = Progression.level()
+	check("Data.Level readable", level ~= nil, level and ("level " .. tostring(level)) or "Player.Data.Level missing")
+
+	local questInfo, questProblem = Quests.readActive()
+	local questDetail = questProblem
+
+	if questInfo then
+		questDetail = questInfo.visible and "quest visible" or "no active quest"
+	end
+
+	check("Quest UI found", questInfo ~= nil, questDetail)
+
+	local quest = level and Quests.select(level) or nil
+	check("Quest selected", quest ~= nil, quest and (quest.name .. " -> " .. quest.mob) or "none for this level or place")
+	check("workspace.Enemies", workspace:FindFirstChild("Enemies") ~= nil)
+
+	if quest and root then
+		local enemy, distance = Enemies.nearest(quest.mob, root.Position)
+		local detail = "none loaded, travel to the camp first"
+
+		if enemy then
+			detail = string.format("%d studs away", math.floor(distance))
+		end
+
+		check("Quest mob loaded", enemy ~= nil, detail)
+	end
+
+	check("CommF_ remote", Remotes.getCommF() ~= nil)
+
+	local toolType = Config.get("weaponType")
+	local hasTool = false
+	local containers = {}
+	local backpack = localPlayer:FindFirstChild("Backpack")
+
+	if model then
+		table.insert(containers, model)
+	end
+
+	if backpack then
+		table.insert(containers, backpack)
+	end
+
+	for _, container in containers do
+		for _, child in container:GetChildren() do
+			if child:IsA("Tool") and child.ToolTip == toolType then
+				hasTool = true
+			end
+		end
+	end
+
+	check(toolType .. " tool available", hasTool, not hasTool and ("equip or buy a " .. toolType .. " weapon") or nil)
+
+	local attackRemote, hitRemote = Combat.resolveRemotes(true)
+	check("RegisterAttack remote", attackRemote ~= nil)
+	check("RegisterHit remote", hitRemote ~= nil)
+	check("Hit session value", Combat.sessionId() ~= nil, "only the session profiles use it")
+
+	local profile = Combat.currentProfile()
+	local verified = Combat.verifiedIndex == Combat.profileIndex and "verified" or "not verified yet"
+	check("Hit profile", true, profile.name .. " (" .. verified .. ")")
+
+	local missing = Dependencies.missing({ "request", "writefile", "readfile", "isfile", "setclipboard", "gethui", "getgenv", "getrenv" })
+	check("Executor functions", #missing == 0, #missing > 0 and ("missing " .. table.concat(missing, ", ")) or nil)
+	check("debug.getupvalues", type(debug.getupvalues) == "function")
+
+	local canRaiseRadius = Dependencies.has("setsimulationradius") or Dependencies.has("sethiddenproperty")
+	check("Simulation radius control", canRaiseRadius, not canRaiseRadius and "bring mobs will not replicate" or nil)
+
+	local canCheckOwner = Dependencies.has("isnetworkowner")
+	check("isnetworkowner", canCheckOwner, not canCheckOwner and "failed bring cannot be detected" or nil)
+
+	if Dependencies.has("setclipboard") then
+		pcall(setclipboard, table.concat(lines, "\n"))
+	end
+
+	Notify.push(string.format("Diagnostics: %d passed, %d failed", passed, failed), failed > 0 and "WARN" or "INFO")
+	return passed, failed
+end
+
+--------------------------------------------------------------------------------
+-- GUI.
+--------------------------------------------------------------------------------
+
+local THEME = {
+	obsidian = Color3.fromRGB(9, 9, 15),
+	panel = Color3.fromRGB(16, 16, 26),
+	element = Color3.fromRGB(23, 23, 37),
+	hover = Color3.fromRGB(32, 32, 52),
+	stroke = Color3.fromRGB(44, 44, 72),
+	text = Color3.fromRGB(236, 238, 248),
+	subtext = Color3.fromRGB(139, 144, 170),
+	blue = Color3.fromRGB(0, 170, 255),
+	violet = Color3.fromRGB(139, 92, 246),
+	good = Color3.fromRGB(52, 211, 153),
+	warn = Color3.fromRGB(251, 191, 36),
+	bad = Color3.fromRGB(248, 113, 113),
+	off = Color3.fromRGB(58, 60, 84),
+}
+
+local LEVEL_COLORS = { INFO = THEME.subtext, WARN = THEME.warn, ERROR = THEME.bad }
+local BADGE_COLORS = {
+	VERIFIED = THEME.good,
+	UNTESTED = THEME.warn,
+	PARTIAL = THEME.blue,
+	UNSUPPORTED = THEME.off,
+	DEPENDENCIES = THEME.bad,
+}
+
+local Gui = { maid = Maid.new(), root = nil }
+
+---Create an instance from a property table. Parent is applied last.
+---@param className string
+---@param properties table
+---@return Instance
+local function create(className, properties)
+	local instance = Instance.new(className)
+	local parent = nil
+
+	for key, value in properties do
+		if key == "Parent" then
+			parent = value
+		else
+			instance[key] = value
+		end
+	end
+
+	instance.Parent = parent
+	return instance
+end
+
+---@param instance Instance
+---@param radius number
+local function addCorner(instance, radius)
+	create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = instance })
+end
+
+---@param instance Instance
+---@param color Color3
+local function addStroke(instance, color)
+	create("UIStroke", { Color = color, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = instance })
+end
+
+---@param instance Instance
+---@param rotation number
+local function addGradient(instance, rotation)
+	create("UIGradient", { Color = ColorSequence.new(THEME.blue, THEME.violet), Rotation = rotation or 0, Parent = instance })
+end
+
+---@param instance Instance
+---@param goal table
+---@param duration number?
+local function animate(instance, goal, duration)
+	tweenService:Create(instance, TweenInfo.new(duration or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal):Play()
+end
+
+---Build the whole interface. Every control calls a real function.
+function Gui.build()
+	local maid = Gui.maid
+	local refreshers = {}
+	local orders = {}
+
+	---@param parent Instance
+	---@return number
+	local function nextOrder(parent)
+		orders[parent] = (orders[parent] or 0) + 1
+		return orders[parent]
+	end
+
+	local hostParent = playerGui
+
+	if Dependencies.has("gethui") then
+		local success, result = pcall(gethui)
+		if success and result then
+			hostParent = result
+		end
+	else
+		Logger.warn("Gui", "gethui unavailable, using PlayerGui")
+	end
+
+	local screenGui = maid:add(create("ScreenGui", {
+		Name = "VantexHub",
+		ResetOnSpawn = false,
+		DisplayOrder = 999,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Parent = hostParent,
+	}))
+
+	Gui.root = screenGui
+
+	local camera = workspace.CurrentCamera
+
+	---@return Vector2
+	local function windowSize()
+		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		return Vector2.new(math.clamp(viewport.X - 16, 300, 560), math.clamp(viewport.Y - 16, 250, 380))
+	end
+
+	local size = windowSize()
+
+	local main = create("Frame", {
+		Name = "Main",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size.X, size.Y),
+		BackgroundColor3 = THEME.obsidian,
+		BorderSizePixel = 0,
+		Active = true,
+		Parent = screenGui,
+	})
+
+	addCorner(main, 12)
+	addStroke(main, THEME.stroke)
+
+	local uiScale = create("UIScale", { Scale = Config.get("uiScale"), Parent = main })
+
+	if camera then
+		maid:add(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			local updated = windowSize()
+			main.Size = UDim2.fromOffset(updated.X, updated.Y)
+		end))
+	end
+
+	maid:add(Config.changed:connect(function(key, value)
+		if key == "uiScale" then
+			uiScale.Scale = value
+		end
+	end).disconnect)
+
+	-- Header.
+	local header = create("Frame", {
+		Name = "Header",
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+		Parent = main,
+	})
+
+	addCorner(header, 12)
+
+	create("Frame", {
+		Position = UDim2.new(0, 0, 1, -12),
+		Size = UDim2.new(1, 0, 0, 12),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+		Parent = header,
+	})
+
+	local accentLine = create("Frame", {
+		Position = UDim2.new(0, 0, 1, -2),
+		Size = UDim2.new(1, 0, 0, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		Parent = header,
+	})
+
+	addGradient(accentLine, 0)
+
+	local title = create("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.new(1, -110, 1, -2),
+		Font = Enum.Font.GothamBlack,
+		Text = HUB_NAME,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = header,
+	})
+
+	addGradient(title, 0)
+
+	local chip = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -86, 0.5, -1),
+		Size = UDim2.fromOffset(78, 20),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		Text = "FARM OFF",
+		TextColor3 = THEME.subtext,
+		TextSize = 10,
+		Parent = header,
+	})
+
+	addCorner(chip, 10)
+
+	table.insert(refreshers, function()
+		local text, color = "FARM OFF", THEME.subtext
+
+		if Farm.running then
+			if Farm.paused then
+				text, color = "PAUSED", THEME.warn
+			elseif Farm.state == STATES.RECOVERING then
+				text, color = "RECOVERING", THEME.bad
+			elseif Farm.state == STATES.WAITING_FOR_RESPAWN then
+				text, color = "RESPAWNING", THEME.warn
+			else
+				text, color = "FARMING", THEME.good
+			end
+		end
+
+		chip.Text = text
+		chip.TextColor3 = color
+	end)
+
+	---@param text string
+	---@param offset number
+	---@param callback function
+	---@return TextButton
+	local function headerButton(text, offset, callback)
+		local button = create("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, offset, 0.5, -1),
+			Size = UDim2.fromOffset(32, 28),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 14,
+			Parent = header,
+		})
+
+		addCorner(button, 8)
+
+		maid:add(button.MouseEnter:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.hover })
+		end))
+
+		maid:add(button.MouseLeave:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.element })
+		end))
+
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	local openButton = maid:add(create("TextButton", {
+		Name = "Open",
+		Visible = false,
+		Position = UDim2.fromOffset(14, 90),
+		Size = UDim2.fromOffset(44, 44),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBlack,
+		Text = "V",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextSize = 20,
+		Parent = screenGui,
+	}))
+
+	addCorner(openButton, 22)
+	addGradient(openButton, 45)
+
+	---@param visible boolean
+	local function setVisible(visible)
+		main.Visible = visible
+		openButton.Visible = not visible
+	end
+
+	headerButton("-", -44, function()
+		setVisible(false)
+	end)
+
+	local closeArmedAt = 0
+	local closeButton = nil
+
+	closeButton = headerButton("X", -8, function()
+		if os.clock() - closeArmedAt > 3 then
+			closeArmedAt = os.clock()
+			closeButton.Text = "?"
+			closeButton.TextColor3 = THEME.bad
+			Notify.push("Tap X again to detach VANTEX HUB", "WARN")
+			return
+		end
+
+		Notify.push("Detaching VANTEX HUB", "INFO")
+
+		task.defer(function()
+			if shared.VantexHub then
+				shared.VantexHub.detach()
+			end
+		end)
+	end)
+
+	table.insert(refreshers, function()
+		if closeArmedAt > 0 and os.clock() - closeArmedAt > 3 then
+			closeArmedAt = 0
+			closeButton.Text = "X"
+			closeButton.TextColor3 = THEME.text
+		end
+	end)
+
+	maid:add(openButton.MouseButton1Click:Connect(function()
+		setVisible(true)
+	end))
+
+	maid:add(userInputService.InputBegan:Connect(function(input, processed)
+		if not processed and input.KeyCode == Enum.KeyCode.RightControl then
+			setVisible(not main.Visible)
+		end
+	end))
+
+	-- Dragging by the header, mouse and touch.
+	local dragging, dragStart, startPosition = false, nil, nil
+
+	maid:add(header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPosition = main.Position
+		end
+	end))
+
+	maid:add(userInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+
+	maid:add(userInputService.InputChanged:Connect(function(input)
+		local isMove = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+
+		if dragging and isMove then
+			local delta = input.Position - dragStart
+			main.Position = UDim2.new(
+				startPosition.X.Scale,
+				startPosition.X.Offset + delta.X,
+				startPosition.Y.Scale,
+				startPosition.Y.Offset + delta.Y
+			)
+		end
+	end))
+
+	-- Tab bar and pages.
+	local tabBar = create("Frame", {
+		Position = UDim2.fromOffset(8, 46),
+		Size = UDim2.new(1, -16, 0, 32),
+		BackgroundTransparency = 1,
+		Parent = main,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = tabBar,
+	})
+
+	local body = create("Frame", {
+		Position = UDim2.fromOffset(0, 84),
+		Size = UDim2.new(1, 0, 1, -84),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Parent = main,
+	})
+
+	local TAB_NAMES = { "Dashboard", "Farm", "Features", "Settings", "Logs" }
+	local pages, tabButtons = {}, {}
+
+	---@param name string
+	local function selectTab(name)
+		for tabName, page in pages do
+			local active = tabName == name
+			page.Visible = active
+
+			animate(tabButtons[tabName], {
+				BackgroundColor3 = active and THEME.hover or THEME.panel,
+				TextColor3 = active and THEME.text or THEME.subtext,
+			})
+		end
+	end
+
+	for index, name in TAB_NAMES do
+		local button = create("TextButton", {
+			LayoutOrder = index,
+			Size = UDim2.new(1 / #TAB_NAMES, -4, 1, 0),
+			BackgroundColor3 = THEME.panel,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = name,
+			TextColor3 = THEME.subtext,
+			TextSize = 12,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Parent = tabBar,
+		})
+
+		addCorner(button, 8)
+		maid:add(button.MouseButton1Click:Connect(function()
+			selectTab(name)
+		end))
+
+		local page = create("ScrollingFrame", {
+			Name = name,
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollBarThickness = 3,
+			ScrollBarImageColor3 = THEME.stroke,
+			Visible = false,
+			Parent = body,
+		})
+
+		create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 4),
+			PaddingBottom = UDim.new(0, 10),
+			PaddingLeft = UDim.new(0, 10),
+			PaddingRight = UDim.new(0, 12),
+			Parent = page,
+		})
+
+		pages[name] = page
+		tabButtons[name] = button
+	end
+
+	-- Toast notifications.
+	local toast = create("TextLabel", {
+		Name = "Toast",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 46),
+		Size = UDim2.new(0.8, 0, 0, 30),
+		BackgroundColor3 = THEME.element,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamMedium,
+		Text = "",
+		TextColor3 = THEME.text,
+		TextSize = 12,
+		TextTransparency = 1,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 20,
+		Parent = main,
+	})
+
+	addCorner(toast, 15)
+
+	local toastToken = 0
+
+	maid:add(Notify.shown:connect(function(message, level)
+		toastToken += 1
+		local token = toastToken
+
+		toast.Text = message
+		toast.TextColor3 = level == "ERROR" and THEME.bad or level == "WARN" and THEME.warn or THEME.text
+		animate(toast, { BackgroundTransparency = 0.05, TextTransparency = 0 }, 0.15)
+
+		task.delay(3, function()
+			if toastToken == token and toast.Parent then
+				animate(toast, { BackgroundTransparency = 1, TextTransparency = 1 }, 0.25)
+			end
+		end)
+	end).disconnect)
+
+	-- Reusable components.
+	---@param parent Instance
+	---@param height number
+	---@return Frame
+	local function createRow(parent, height)
+		local row = create("Frame", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, height),
+			BackgroundColor3 = THEME.element,
+			BorderSizePixel = 0,
+			Parent = parent,
+		})
+
+		addCorner(row, 8)
+		return row
+	end
+
+	---@param parent Instance
+	---@param text string
+	local function addSection(parent, text)
+		return create("TextLabel", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, 18),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = string.upper(text),
+			TextColor3 = THEME.blue,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = parent,
+		})
+	end
+
+	---A labelled value row refreshed from a getter.
+	---@param parent Instance
+	---@param label string
+	---@param getter function
+	---@param height number?
+	local function addInfo(parent, label, getter, height)
+		local row = createRow(parent, height or 46)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 14),
+			Font = Enum.Font.GothamBold,
+			Text = string.upper(label),
+			TextColor3 = THEME.subtext,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local value = create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 21),
+			Size = UDim2.new(1, -24, 0, (height or 46) - 25),
+			Font = Enum.Font.GothamMedium,
+			Text = "",
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Parent = row,
+		})
+
+		table.insert(refreshers, function()
+			value.Text = getter()
+		end)
+	end
+
+	---@param parent Instance
+	---@param text string
+	---@param callback function
+	---@param color Color3?
+	---@return TextButton
+	local function addButton(parent, text, callback, color)
+		local button = create("TextButton", {
+			LayoutOrder = nextOrder(parent),
+			Size = UDim2.new(1, 0, 0, 34),
+			BackgroundColor3 = color or THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			Parent = parent,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+
+		maid:add(button.MouseEnter:Connect(function()
+			animate(button, { BackgroundColor3 = THEME.hover })
+		end))
+
+		maid:add(button.MouseLeave:Connect(function()
+			animate(button, { BackgroundColor3 = color or THEME.element })
+		end))
+
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	---A pill switch whose state always comes from a getter.
+	---@param row Frame
+	---@param getState function
+	---@param onClick function
+	local function addSwitch(row, getState, onClick)
+		local track = create("Frame", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -10, 0.5, 0),
+			Size = UDim2.fromOffset(42, 22),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(track, 11)
+
+		local knob = create("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 3, 0.5, 0),
+			Size = UDim2.fromOffset(16, 16),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			Parent = track,
+		})
+
+		addCorner(knob, 8)
+
+		local lastState = nil
+
+		local function sync()
+			local state = getState()
+			if state == lastState then
+				return
+			end
+
+			lastState = state
+
+			local on = state == "ON" or state == "PAUSED"
+			local color = state == "PAUSED" and THEME.warn or THEME.blue
+
+			animate(track, { BackgroundColor3 = on and color or THEME.off })
+			animate(knob, { Position = on and UDim2.new(0, 23, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) })
+		end
+
+		table.insert(refreshers, sync)
+
+		local hit = create("TextButton", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Text = "",
+			ZIndex = 5,
+			Parent = row,
+		})
+
+		maid:add(hit.MouseButton1Click:Connect(function()
+			onClick()
+			sync()
+		end))
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	local function addConfigToggle(parent, label, key)
+		local row = createRow(parent, 36)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 0),
+			Size = UDim2.new(1, -70, 1, 0),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		addSwitch(row, function()
+			return Config.get(key) and "ON" or "OFF"
+		end, function()
+			Config.set(key, not Config.get(key))
+		end)
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	local function addConfigCycle(parent, label, key)
+		local row = createRow(parent, 36)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 0),
+			Size = UDim2.new(1, -140, 1, 0),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local button = create("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -8, 0.5, 0),
+			Size = UDim2.fromOffset(120, 26),
+			BackgroundColor3 = THEME.panel,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = tostring(Config.get(key)),
+			TextColor3 = THEME.blue,
+			TextSize = 12,
+			Parent = row,
+		})
+
+		addCorner(button, 6)
+		addStroke(button, THEME.stroke)
+
+		maid:add(button.MouseButton1Click:Connect(function()
+			local options = SCHEMA[key].options
+			local index = table.find(options, Config.get(key)) or 0
+			Config.set(key, options[index % #options + 1])
+		end))
+
+		table.insert(refreshers, function()
+			button.Text = tostring(Config.get(key))
+		end)
+	end
+
+	---@param parent Instance
+	---@param label string
+	---@param key string
+	---@param step number
+	---@param suffix string
+	local function addConfigSlider(parent, label, key, step, suffix)
+		local field = SCHEMA[key]
+		local row = createRow(parent, 50)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 16),
+			Font = Enum.Font.GothamMedium,
+			Text = label,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local valueLabel = create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(12, 6),
+			Size = UDim2.new(1, -24, 0, 16),
+			Font = Enum.Font.GothamBold,
+			Text = "",
+			TextColor3 = THEME.blue,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = row,
+		})
+
+		local track = create("Frame", {
+			Position = UDim2.new(0, 12, 0, 34),
+			Size = UDim2.new(1, -24, 0, 6),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(track, 3)
+
+		local fill = create("Frame", {
+			Size = UDim2.fromScale(0, 1),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			Parent = track,
+		})
+
+		addCorner(fill, 3)
+		addGradient(fill, 0)
+
+		local function render()
+			local value = Config.get(key)
+			valueLabel.Text = string.format("%s%s", tostring(math.floor(value * 100 + 0.5) / 100), suffix)
+			fill.Size = UDim2.fromScale(math.clamp((value - field.min) / (field.max - field.min), 0, 1), 1)
+		end
+
+		local sliding = false
+
+		local function update(positionX)
+			local alpha = math.clamp((positionX - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+			local raw = field.min + (field.max - field.min) * alpha
+			Config.set(key, math.floor(raw / step + 0.5) * step)
+			render()
+		end
+
+		local hit = create("TextButton", {
+			Position = UDim2.new(0, 12, 0, 26),
+			Size = UDim2.new(1, -24, 0, 22),
+			BackgroundTransparency = 1,
+			Text = "",
+			ZIndex = 5,
+			Parent = row,
+		})
+
+		maid:add(hit.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = true
+				update(input.Position.X)
+			end
+		end))
+
+		maid:add(userInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = false
+			end
+		end))
+
+		maid:add(userInputService.InputChanged:Connect(function(input)
+			local isMove = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+			if sliding and isMove then
+				update(input.Position.X)
+			end
+		end))
+
+		table.insert(refreshers, render)
+		render()
+	end
+
+	-- Dashboard.
+	local dashboard = pages.Dashboard
+
+	addSection(dashboard, "Overview")
+
+	addInfo(dashboard, "Auto Farm", function()
+		return string.format("%s  -  %s", Farm.state, Farm.reason)
+	end)
+
+	addInfo(dashboard, "Active task", function()
+		return Farm.taskText()
+	end)
+
+	addInfo(dashboard, "Character", function()
+		local percent = Character.healthPercent()
+		if not percent then
+			return "No live character"
+		end
+
+		return string.format("Alive  -  %d%% health", math.floor(percent))
+	end)
+
+	addInfo(dashboard, "Progression", function()
+		local level, points = Progression.level(), Progression.points()
+		if not level then
+			return "Unavailable (Data.Level not found)"
+		end
+
+		return string.format("Level %d  -  %d unspent points", math.floor(level), math.floor(points or 0))
+	end)
+
+	addInfo(dashboard, "Session", function()
+		return string.format("%d kills  -  %.1f per minute", Farm.stats.kills, Farm.killsPerMinute())
+	end)
+
+	addInfo(dashboard, "Hit method", function()
+		return Combat.statusText()
+	end)
+
+	addInfo(dashboard, "Target tracking", function()
+		return Status.tracking
+	end)
+
+	addInfo(dashboard, "Loot and events", function()
+		return Status.chests .. "  -  " .. Status.raid
+	end)
+
+	addInfo(dashboard, "Travel", function()
+		if Navigation.busy then
+			return "Travelling to " .. Navigation.selectedName()
+		end
+
+		if ServerHop.busy then
+			return Status.hop
+		end
+
+		return "Idle"
+	end)
+
+	addInfo(dashboard, "Last notice", function()
+		return Logger.lastNotice
+	end, 58)
+
+	-- Farm tab.
+	local farmPage = pages.Farm
+
+	addSection(farmPage, "Control")
+
+	local farmRow = createRow(farmPage, 40)
+
+	create("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -70, 1, 0),
+		Font = Enum.Font.GothamBold,
+		Text = "Auto Farm",
+		TextColor3 = THEME.text,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = farmRow,
+	})
+
+	addSwitch(farmRow, function()
+		return Features.status("AutoFarm")
+	end, function()
+		Features.setEnabled("AutoFarm", not Features.isEnabled(Features.byKey.AutoFarm))
+	end)
+
+	local controls = create("Frame", {
+		LayoutOrder = nextOrder(farmPage),
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundTransparency = 1,
+		Parent = farmPage,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = controls,
+	})
+
+	local controlDefinitions = {
+		{ "Start", function() Features.setEnabled("AutoFarm", true) end },
+		{ "Pause", function() Farm.pause() end },
+		{ "Resume", function() Farm.resume() end },
+		{ "Stop", function() Features.setEnabled("AutoFarm", false) end },
+	}
+
+	local controlButtons = {}
+
+	for index, definition in controlDefinitions do
+		local button = create("TextButton", {
+			LayoutOrder = index,
+			Size = UDim2.new(0.25, -3, 1, 0),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = definition[1],
+			TextColor3 = THEME.text,
+			TextSize = 12,
+			Parent = controls,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+		maid:add(button.MouseButton1Click:Connect(definition[2]))
+		controlButtons[definition[1]] = button
+	end
+
+	-- Dim buttons that do nothing in the current state.
+	table.insert(refreshers, function()
+		local enabled = {
+			Start = not Farm.running,
+			Pause = Farm.running and not Farm.paused,
+			Resume = Farm.running and Farm.paused,
+			Stop = Farm.running,
+		}
+
+		for name, button in controlButtons do
+			button.TextColor3 = enabled[name] and THEME.text or THEME.off
+		end
+	end)
+
+	addSection(farmPage, "Live information")
+
+	addInfo(farmPage, "Quest", function()
+		local quest = Farm.context.quest
+		if not quest then
+			return "No quest selected yet"
+		end
+
+		local active = Quests.isActiveFor(quest)
+		return string.format("%s #%d  -  %s  -  %s", quest.name, quest.index, quest.mob, active and "active" or "not active")
+	end, 58)
+
+	addInfo(farmPage, "Target", function()
+		local target = Farm.context.target
+		if not Enemies.isAlive(target) then
+			return "None"
+		end
+
+		local humanoid = target:FindFirstChildOfClass("Humanoid")
+		local _, _, root = Character.get()
+		local distance = root and (target.HumanoidRootPart.Position - root.Position).Magnitude or 0
+
+		return string.format(
+			"%s  -  %d/%d HP  -  %d studs",
+			target.Name,
+			math.floor(humanoid.Health),
+			math.floor(humanoid.MaxHealth),
+			math.floor(distance)
+		)
+	end, 58)
+
+	addInfo(farmPage, "Progress", function()
+		if not Farm.running then
+			return "Auto Farm is off"
+		end
+
+		local sinceProgress = os.clock() - Farm.context.lastProgressAt
+		return string.format(
+			"%d kills  -  last progress %ds ago  -  recoveries %d",
+			Farm.stats.kills,
+			math.floor(sinceProgress),
+			Farm.context.recoveries
+		)
+	end, 58)
+
+	addInfo(farmPage, "Pile", function()
+		if not Farm.running then
+			return "Auto Farm is off"
+		end
+
+		local context = Farm.context
+		local bringing = Config.get("bringMobs") and os.clock() >= context.bringBlockedUntil
+
+		local hover = math.floor(Combat.effectiveHover())
+		local configured = math.floor(Config.get("hoverHeight"))
+		local hoverText = hover < configured and string.format("%d studs (limited from %d)", hover, configured) or string.format("%d studs", hover)
+		local farthest = Combat.farthestHit > 0 and string.format("  -  farthest hit %d studs", math.floor(Combat.farthestHit)) or ""
+
+		return string.format(
+			"%d mobs in reach  -  bring %s  -  hover %s%s",
+			context.pileCount,
+			bringing and "on" or "off",
+			hoverText,
+			farthest
+		)
+	end, 70)
+
+	-- Features tab.
+	local featuresPage = pages.Features
+
+	local search = create("TextBox", {
+		LayoutOrder = nextOrder(featuresPage),
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Gotham,
+		PlaceholderText = "Search features...",
+		PlaceholderColor3 = THEME.subtext,
+		Text = "",
+		TextColor3 = THEME.text,
+		TextSize = 13,
+		Parent = featuresPage,
+	})
+
+	addCorner(search, 8)
+	addStroke(search, THEME.stroke)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), Parent = search })
+
+	local featureRows = {}
+	local categoryHeaders = {}
+
+	for _, feature in Features.list do
+		if not categoryHeaders[feature.category] then
+			categoryHeaders[feature.category] = addSection(featuresPage, feature.category)
+		end
+
+		local row = createRow(featuresPage, 52)
+		featureRows[feature] = row
+
+		local dot = create("Frame", {
+			Position = UDim2.fromOffset(10, 10),
+			Size = UDim2.fromOffset(8, 8),
+			BackgroundColor3 = THEME.off,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+
+		addCorner(dot, 4)
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(24, 4),
+			Size = UDim2.new(1, -150, 0, 18),
+			Font = Enum.Font.GothamBold,
+			Text = feature.name,
+			TextColor3 = THEME.text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(24, 22),
+			Size = UDim2.new(1, -150, 0, 26),
+			Font = Enum.Font.Gotham,
+			Text = feature.description,
+			TextColor3 = THEME.subtext,
+			TextSize = 11,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Parent = row,
+		})
+
+		local badge = create("TextLabel", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -62, 0, 8),
+			Size = UDim2.fromOffset(74, 16),
+			BackgroundColor3 = THEME.panel,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = "",
+			TextColor3 = THEME.subtext,
+			TextSize = 9,
+			Parent = row,
+		})
+
+		addCorner(badge, 8)
+
+		table.insert(refreshers, function()
+			local compat = Features.effectiveCompat(feature)
+			badge.Text = COMPAT_BADGES[compat]
+			badge.TextColor3 = BADGE_COLORS[compat]
+
+			local status = Features.status(feature.key)
+			dot.BackgroundColor3 = status == "ON" and THEME.good or status == "PAUSED" and THEME.warn or THEME.off
+		end)
+
+		if feature.kind == "toggle" then
+			addSwitch(row, function()
+				return Features.status(feature.key)
+			end, function()
+				Features.setEnabled(feature.key, not Features.isEnabled(feature))
+			end)
+		elseif feature.kind == "action" then
+			local run = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -8, 0.5, 8),
+				Size = UDim2.fromOffset(50, 24),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Run",
+				TextColor3 = THEME.blue,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(run, 6)
+			addStroke(run, THEME.stroke)
+
+			maid:add(run.MouseButton1Click:Connect(function()
+				local available, reason = Features.available(feature)
+				if not available then
+					Notify.push(feature.name .. " unavailable: " .. tostring(reason), "WARN")
+					return
+				end
+
+				feature.run()
+			end))
+		else
+			row.Size = UDim2.new(1, 0, 0, 84)
+
+			local destination = create("TextButton", {
+				Position = UDim2.new(0, 24, 0, 50),
+				Size = UDim2.new(1, -110, 0, 26),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "",
+				TextColor3 = THEME.blue,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(destination, 6)
+			addStroke(destination, THEME.stroke)
+			maid:add(destination.MouseButton1Click:Connect(Navigation.cycle))
+
+			table.insert(refreshers, function()
+				destination.Text = Navigation.selectedName()
+			end)
+
+			local go = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -8, 0, 50),
+				Size = UDim2.fromOffset(40, 26),
+				BackgroundColor3 = THEME.blue,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Go",
+				TextColor3 = Color3.new(1, 1, 1),
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(go, 6)
+			maid:add(go.MouseButton1Click:Connect(Navigation.go))
+
+			local stop = create("TextButton", {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -52, 0, 50),
+				Size = UDim2.fromOffset(46, 26),
+				BackgroundColor3 = THEME.panel,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				Font = Enum.Font.GothamBold,
+				Text = "Stop",
+				TextColor3 = THEME.bad,
+				TextSize = 12,
+				Parent = row,
+			})
+
+			addCorner(stop, 6)
+			addStroke(stop, THEME.stroke)
+			maid:add(stop.MouseButton1Click:Connect(Navigation.cancel))
+		end
+	end
+
+	maid:add(search:GetPropertyChangedSignal("Text"):Connect(function()
+		local query = string.lower(search.Text)
+		local visibleCategories = {}
+
+		for feature, row in featureRows do
+			local haystack = string.lower(feature.name .. " " .. feature.description .. " " .. feature.category)
+			local matches = query == "" or string.find(haystack, query, 1, true) ~= nil
+
+			row.Visible = matches
+
+			if matches then
+				visibleCategories[feature.category] = true
+			end
+		end
+
+		for category, header in categoryHeaders do
+			header.Visible = visibleCategories[category] == true
+		end
+	end))
+
+	-- Settings tab.
+	local settingsPage = pages.Settings
+
+	addSection(settingsPage, "Interface")
+	addConfigSlider(settingsPage, "Interface scale", "uiScale", 0.05, "x")
+	addConfigSlider(settingsPage, "Refresh interval", "refreshInterval", 0.25, "s")
+	addConfigCycle(settingsPage, "Notifications", "notifications")
+
+	addSection(settingsPage, "Farming")
+	addConfigToggle(settingsPage, "Take level quests", "autoQuest")
+	addConfigCycle(settingsPage, "Sea (for unknown places)", "seaOverride")
+	addConfigSlider(settingsPage, "Stop at level (0 = never)", "stopAtLevel", 50, "")
+	addConfigCycle(settingsPage, "Weapon type", "weaponType")
+	addConfigCycle(settingsPage, "Hit method", "hitMethod")
+	addConfigCycle(settingsPage, "Click input", "inputMethod")
+	addConfigSlider(settingsPage, "Hover height", "hoverHeight", 1, " studs")
+	addConfigSlider(settingsPage, "Attack rate", "attackRate", 1, " /s")
+	addConfigSlider(settingsPage, "Targets per hit", "maxTargets", 1, "")
+	addConfigToggle(settingsPage, "Bring mobs to me", "bringMobs")
+	addConfigSlider(settingsPage, "Bring range", "bringRange", 10, " studs")
+	addConfigSlider(settingsPage, "Hit range", "hitRange", 10, " studs")
+	addConfigToggle(settingsPage, "Hit the whole pile", "multiHit")
+	addConfigSlider(settingsPage, "Move speed", "moveSpeed", 10, " studs/s")
+	addConfigSlider(settingsPage, "Retreat below health (0 = off)", "retreatPercent", 5, "%")
+	addConfigCycle(settingsPage, "Stat target", "statTarget")
+
+	addSection(settingsPage, "Performance")
+
+	if Dependencies.has("setfpscap") then
+		addConfigSlider(settingsPage, "FPS cap (0 = unchanged)", "fpsCap", 10, "")
+	else
+		addInfo(settingsPage, "FPS cap", function()
+			return "Unavailable: executor has no setfpscap"
+		end, 40)
+	end
+
+	addSection(settingsPage, "Configuration")
+
+	addButton(settingsPage, "Save settings now", function()
+		Notify.push(Config.save() and "Settings saved" or "Settings could not be saved", "INFO")
+	end)
+
+	addButton(settingsPage, "Reload saved settings", function()
+		Config.load()
+
+		for key, value in Config.values do
+			Config.changed:fire(key, value)
+		end
+
+		Notify.push("Settings reloaded", "INFO")
+	end)
+
+	local resetButton = nil
+	local resetArmedAt = 0
+
+	resetButton = addButton(settingsPage, "Reset settings to defaults", function()
+		if os.clock() - resetArmedAt > 3 then
+			resetArmedAt = os.clock()
+			resetButton.Text = "Tap again to confirm reset"
+			return
+		end
+
+		resetArmedAt = 0
+		resetButton.Text = "Reset settings to defaults"
+		Config.resetToDefaults()
+		Notify.push("Settings reset", "INFO")
+	end, Color3.fromRGB(70, 28, 36))
+
+	table.insert(refreshers, function()
+		if resetArmedAt > 0 and os.clock() - resetArmedAt > 3 then
+			resetArmedAt = 0
+			resetButton.Text = "Reset settings to defaults"
+		end
+	end)
+
+	-- Logs tab.
+	local logsPage = pages.Logs
+	local logFilter = "All"
+	local logFilters = { "All", "Errors", "State" }
+	local lastLogVersion = -1
+	local logLabels = {}
+
+	local logControls = create("Frame", {
+		LayoutOrder = nextOrder(logsPage),
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundTransparency = 1,
+		Parent = logsPage,
+	})
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = logControls,
+	})
+
+	---@param order number
+	---@param text string
+	---@param callback function
+	---@return TextButton
+	local function logButton(order, text, callback)
+		local button = create("TextButton", {
+			LayoutOrder = order,
+			Size = UDim2.new(1 / 4, -3, 1, 0),
+			BackgroundColor3 = THEME.element,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = THEME.text,
+			TextSize = 12,
+			Parent = logControls,
+		})
+
+		addCorner(button, 8)
+		addStroke(button, THEME.stroke)
+		maid:add(button.MouseButton1Click:Connect(callback))
+		return button
+	end
+
+	local filterButton = nil
+
+	filterButton = logButton(1, "Filter: All", function()
+		local index = table.find(logFilters, logFilter) or 0
+		logFilter = logFilters[index % #logFilters + 1]
+		filterButton.Text = "Filter: " .. logFilter
+		lastLogVersion = -1
+	end)
+
+	logButton(2, "Diagnose", function()
+		task.spawn(function()
+			local success, errorMessage = pcall(Diagnostics.run)
+			if not success then
+				Logger.error("Diag", "Diagnostics failed: %s", firstLine(errorMessage))
+			end
+		end)
+	end)
+
+	logButton(3, "Copy", function()
+		if not Dependencies.has("setclipboard") then
+			Notify.push("Copy needs setclipboard", "WARN")
+			return
+		end
+
+		local lines = {}
+
+		for _, entry in Logger.entries do
+			table.insert(lines, string.format("%s [%s] %s: %s", entry.time, entry.level, entry.category, entry.message))
+		end
+
+		setclipboard(table.concat(lines, "\n"))
+		Notify.push("Logs copied", "INFO")
+	end)
+
+	logButton(4, "Clear", function()
+		Logger.clear()
+	end)
+
+	for index = 1, LOG_VIEW_LIMIT do
+		logLabels[index] = create("TextLabel", {
+			LayoutOrder = nextOrder(logsPage),
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			Text = "",
+			TextColor3 = THEME.subtext,
+			TextSize = 11,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Visible = false,
+			Parent = logsPage,
+		})
+	end
+
+	table.insert(refreshers, function()
+		if lastLogVersion == Logger.version or not pages.Logs.Visible then
+			return
+		end
+
+		lastLogVersion = Logger.version
+
+		local nearBottom = logsPage.CanvasPosition.Y + logsPage.AbsoluteWindowSize.Y >= logsPage.AbsoluteCanvasSize.Y - 40
+		local visible = {}
+
+		for index = #Logger.entries, 1, -1 do
+			local entry = Logger.entries[index]
+			local include = logFilter == "All"
+				or (logFilter == "Errors" and entry.level ~= "INFO")
+				or (logFilter == "State" and entry.category == "State")
+
+			if include then
+				table.insert(visible, 1, entry)
+
+				if #visible >= LOG_VIEW_LIMIT then
+					break
+				end
+			end
+		end
+
+		for index, label in logLabels do
+			local entry = visible[index]
+
+			if entry then
+				local suffix = entry.count > 1 and string.format(" (x%d)", entry.count) or ""
+				label.Text = string.format("%s %s %s: %s%s", entry.time, entry.level, entry.category, entry.message, suffix)
+				label.TextColor3 = LEVEL_COLORS[entry.level] or THEME.subtext
+				label.Visible = true
+			else
+				label.Visible = false
+			end
+		end
+
+		if nearBottom then
+			task.delay(0.05, function()
+				if logsPage.Parent then
+					logsPage.CanvasPosition = Vector2.new(0, 1e6)
+				end
+			end)
+		end
+	end)
+
+	-- Refresh loop. Interval comes from settings and every refresher is isolated.
+	local refreshActive = true
+	maid:add(function()
+		refreshActive = false
+	end)
+
+	task.spawn(function()
+		while refreshActive do
+			for _, refresher in refreshers do
+				local success, errorMessage = pcall(refresher)
+				if not success then
+					Logger.error("Gui", "%s", firstLine(errorMessage))
+				end
+			end
+
+			task.wait(Config.get("refreshInterval"))
+		end
+	end)
+
+	selectTab("Dashboard")
+end
+
+---Destroy the interface.
+function Gui.destroy()
+	Gui.maid:clean()
+	Gui.root = nil
+end
+
+--------------------------------------------------------------------------------
+-- Application lifecycle.
+--------------------------------------------------------------------------------
+
+local Vantex = { maid = Maid.new() }
+
+---Apply settings that touch the engine.
+---@param key string
+---@param value any
+local function onConfigChanged(key, value)
+	if key == "notifications" then
+		Notify.mode = value
+	elseif key == "hoverHeight" then
+		-- A new setting deserves a fresh reach test.
+		Combat.hoverCap = nil
+		Combat.verifiedHover = nil
+		Combat.hoverMisses = 0
+	elseif key == "bringMobs" then
+		if value and Farm.running then
+			Bring.start()
+		elseif not value then
+			Bring.stop()
+		end
+	elseif key == "fpsCap" and value > 0 and Dependencies.has("setfpscap") then
+		setfpscap(value)
+	end
+end
+
+---Stop everything and release every resource.
+function Vantex.detach()
+	Logger.info("Core", "Detaching")
+	Features.stopAll()
+	Farm.stop("detached")
+	Bring.stop()
+	Navigation.cancel()
+	Movement.cancel()
+	Config.save()
+	Character.destroy()
+	Gui.destroy()
+	Vantex.maid:clean()
+
+	if shared.VantexHub == Vantex then
+		shared.VantexHub = nil
+	end
+end
+
+---Start the hub.
+function Vantex.init()
+	Logger.info("Core", "%s starting", HUB_NAME)
+
+	local missing = Dependencies.missing({ "request", "writefile", "readfile", "isfile", "setclipboard", "setfpscap", "mouse1click", "gethui" })
+	if #missing > 0 then
+		Logger.warn("Core", "Optional executor functions missing: %s", table.concat(missing, ", "))
+	end
+
+	Config.load()
+	Notify.mode = Config.get("notifications")
+
+	local problems = Quests.validate()
+	if problems > 0 then
+		Logger.error("Quests", "%d invalid quest entries were found", problems)
+	end
+
+	if not currentSea() then
+		Logger.warn("Core", "Place %d is not a known sea. Pick the sea in Settings to enable Auto Farm", game.PlaceId)
+	end
+
+	Vantex.maid:add(Config.changed:connect(onConfigChanged).disconnect)
+
+	Vantex.maid:add(teleportService.TeleportInitFailed:Connect(function(_, result, message)
+		Notify.push(string.format("Teleport failed: %s", tostring(message ~= "" and message or result)), "ERROR")
+	end))
+
+	-- Anti-AFK so the idle kick does not interrupt long sessions.
+	Vantex.maid:add(localPlayer.Idled:Connect(function()
+		virtualUser:CaptureController()
+		virtualUser:ClickButton2(Vector2.new())
+	end))
+
+	Character.init()
+
+	-- Movement must not outlive the character it was moving.
+	Vantex.maid:add(Character.changed:connect(function(event)
+		if event == "died" or event == "removed" or event == "replaced" then
+			Movement.cancel()
+		end
+	end).disconnect)
+
+	Vantex.maid:add(Farm.changed:connect(function()
+		Features.changed:fire("AutoFarm")
+	end).disconnect)
+
+	local built, errorMessage = pcall(Gui.build)
+	if not built then
+		Logger.error("Gui", "Interface failed to build: %s", firstLine(errorMessage))
+		warn("[VANTEX] " .. firstLine(errorMessage))
+	end
+
+	for key, value in Config.values do
+		onConfigChanged(key, value)
+	end
+
+	Notify.push(HUB_NAME .. " ready. Right Ctrl hides the window.", "INFO")
+end
+
+shared.VantexHub = Vantex
+Vantex.init()
