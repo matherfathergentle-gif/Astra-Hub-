@@ -1,0 +1,5612 @@
+-- Check for table that is shared between executions.
+if not shared then
+	return warn("No shared, no script.")
+end
+
+-- Initialize Luraph globals if they do not exist.
+pcall(function()
+	loadstring("getfenv().LPH_NO_VIRTUALIZE = function(...) return ... end")()
+end)
+
+local AstraHub = {}
+
+-- Tracks connections, instances and callbacks for one-call cleanup.
+local Maid = {}
+Maid.__index = Maid
+
+---Create a new Maid.
+function Maid.new()
+	return setmetatable({ items = {} }, Maid)
+end
+
+---Track an item for cleanup.
+---@param item any
+---@return any
+function Maid:give(item)
+	table.insert(self.items, item)
+	return item
+end
+
+---Clean every tracked item. A failing item never blocks the others.
+function Maid:clean()
+	local items = self.items
+	self.items = {}
+
+	for _, item in items do
+		pcall(function()
+			local itemType = typeof(item)
+
+			if itemType == "RBXScriptConnection" then
+				item:Disconnect()
+			elseif itemType == "Instance" then
+				item:Destroy()
+			elseif itemType == "function" then
+				item()
+			end
+		end)
+	end
+end
+
+-- Constants.
+local VERSION = "v2.2"
+local MENU_TOGGLE_KEYS = { [Enum.KeyCode.RightShift] = true, [Enum.KeyCode.Insert] = true }
+local MIN_RAY_LENGTH = 50
+local DRAG_THRESHOLD = 6
+local SCROLL_THRESHOLD = 8
+local WHEEL_STEP = 70
+local STICKY_MARGIN = 0.7
+local INTRO_DURATION = 1.6
+local CONFIG_FOLDER = "AstraHub"
+local CONFIG_PATH = CONFIG_FOLDER .. "/mm2_config.json"
+local LOGO_PATH = CONFIG_FOLDER .. "/logo.jpg"
+local ROLE_REFRESH = 0.75
+local ROLE_FRESH = 4
+local ROLE_TIMEOUT = 2
+local SAMPLE_WINDOW = 0.8
+local MAX_SAMPLES = 120
+local PING_SMOOTHING = 0.15
+local SCAN_INTERVAL = 1 / 30
+local SHOOT_DEBOUNCE = 0.6
+local TUNE_MIN = 0.6
+local TUNE_MAX = 1.5
+local NORMAL_BOMB_NAME = "FakeBomb"
+local GOLD_BOMB_NAME = "GoldBomb"
+local BOMB_THROW_DISTANCE = 5
+local BOMB_FETCH_ATTEMPTS = 10
+local BOMB_UNEQUIP_DELAY = 0.5
+local BOMB_DEBOUNCE = 0.5
+
+-- Other body parts to try, in order, when a wall hides the chosen one.
+local AIM_FALLBACK_ORDER = {
+	"UpperTorso",
+	"Torso",
+	"HumanoidRootPart",
+	"Head",
+	"LowerTorso",
+	"RightUpperArm",
+	"LeftUpperArm",
+	"Right Arm",
+	"Left Arm",
+	"RightUpperLeg",
+	"LeftUpperLeg",
+	"Right Leg",
+	"Left Leg",
+}
+
+local RAY_METHODS = {
+	FindPartOnRay = true,
+	FindPartOnRayWithIgnoreList = true,
+	FindPartOnRayWithWhitelist = true,
+}
+
+local ROLE_COLORS = {
+	Murderer = Color3.fromRGB(255, 70, 80),
+	Sheriff = Color3.fromRGB(80, 150, 255),
+	Innocent = Color3.fromRGB(120, 220, 140),
+}
+
+local OPTIONS = {
+	priority = { "Crosshair", "Distance", "Health" },
+	hitParts = { "Auto", "Head", "Torso", "Random" },
+	modes = { "Smart", "Basic" },
+	grab = { "Auto", "Touch", "Teleport" },
+	keys = { "None", "Q", "E", "X", "Z", "V", "F", "G", "C", "Mouse2" },
+}
+
+local THEME_PRESETS = {
+	{ name = "Overdrive", accent = Color3.fromRGB(160, 35, 255), accent2 = Color3.fromRGB(220, 45, 255) },
+	{ name = "Astra", accent = Color3.fromRGB(70, 140, 255), accent2 = Color3.fromRGB(168, 92, 255) },
+	{ name = "Ocean", accent = Color3.fromRGB(45, 190, 255), accent2 = Color3.fromRGB(60, 120, 255) },
+	{ name = "Crimson", accent = Color3.fromRGB(255, 80, 100), accent2 = Color3.fromRGB(255, 130, 70) },
+	{ name = "Emerald", accent = Color3.fromRGB(45, 215, 150), accent2 = Color3.fromRGB(60, 190, 230) },
+	{ name = "Sunset", accent = Color3.fromRGB(255, 150, 70), accent2 = Color3.fromRGB(255, 80, 140) },
+	{ name = "Forge", accent = Color3.fromRGB(255, 150, 40), accent2 = Color3.fromRGB(255, 70, 40) },
+}
+
+local THEME_NAMES = {}
+
+for _, preset in THEME_PRESETS do
+	table.insert(THEME_NAMES, preset.name)
+end
+
+local THEME = {
+	background = Color3.fromRGB(7, 5, 14),
+	card = Color3.fromRGB(17, 10, 31),
+	element = Color3.fromRGB(31, 15, 54),
+	accent = THEME_PRESETS[1].accent,
+	accent2 = THEME_PRESETS[1].accent2,
+	text = Color3.fromRGB(247, 240, 255),
+	subText = Color3.fromRGB(177, 157, 202),
+	stroke = Color3.fromRGB(91, 35, 145),
+	success = Color3.fromRGB(80, 220, 140),
+	danger = Color3.fromRGB(235, 80, 95),
+}
+
+-- Services.
+local playersService = game:GetService("Players")
+local runService = game:GetService("RunService")
+local userInputService = game:GetService("UserInputService")
+local tweenService = game:GetService("TweenService")
+local httpService = game:GetService("HttpService")
+local statsService = game:GetService("Stats")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local coreGui = game:GetService("CoreGui")
+
+local wrapClosure = newcclosure or function(callback)
+	return callback
+end
+
+local IS_TOUCH = userInputService.TouchEnabled and not userInputService.KeyboardEnabled
+local ROW_HEIGHT = IS_TOUCH and 44 or 36
+local TEXT_SIZE = IS_TOUCH and 15 or 13
+local TOAST_WIDTH = IS_TOUCH and 230 or 270
+local TOAST_MAX = 4
+
+local localPlayer = playersService.LocalPlayer
+
+local wallParams = RaycastParams.new()
+wallParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local leadParams = RaycastParams.new()
+leadParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local State = {
+	detached = false,
+	holdingGun = false,
+	hasGun = false,
+	menuVisible = false,
+	menuToken = 0,
+	myRole = "Innocent",
+	targetPlayer = nil,
+	targetPart = nil,
+	target = nil,
+	hitRoll = true,
+	headRoll = true,
+	nextRoll = 0,
+	lastScan = 0,
+	lastPing = 0,
+	lastHud = 0,
+	lastShot = 0,
+	sliderActive = false,
+	scrollTaken = false,
+	lastScrollTime = 0,
+	shotsRedirected = 0,
+	hookInstalled = false,
+	configLoaded = false,
+	fovRing = nil,
+	fovStroke = nil,
+	targetLine = nil,
+	targetDot = nil,
+	predictionDot = nil,
+	gui = nil,
+	guiParent = nil,
+	noDrawing = false,
+	errors = {},
+	logoAsset = nil,
+	introOverlay = nil,
+	notifyHolder = nil,
+	watermark = nil,
+	roleChip = nil,
+	profileRole = nil,
+	bombController = nil,
+	goldBombController = nil,
+	silentButton = nil,
+	shootButton = nil,
+	bombQuickButton = nil,
+	goldQuickButton = nil,
+	gunButton = nil,
+	dockSubs = {},
+	syncInterface = nil,
+	currentTab = nil,
+	fps = 60,
+	layoutOrder = 0,
+	esp = {},
+	toasts = {},
+	pageNames = {},
+	pageFrames = {},
+	sections = {},
+	searchEntries = {},
+	accentBound = {},
+	gradients = {},
+	spinners = {},
+	refreshers = {},
+	liveRows = {},
+	pulses = {},
+	maid = Maid.new(),
+	config = {
+		espEnabled = false,
+		espBoxes = true,
+		espNames = true,
+		espRoles = true,
+		espWeapon = true,
+		espHealth = true,
+		espDistance = true,
+		espTracers = false,
+		espChams = false,
+		espMaxDistance = 1500,
+		silentAim = false,
+		silentMurdererOnly = true,
+		silentUseFov = false,
+		silentFov = 400,
+		silentMaxDistance = 900,
+		fovVisible = false,
+		hitPart = "Auto",
+		hitChance = 100,
+		priority = "Crosshair",
+		stickyTarget = true,
+		wallCheck = false,
+		targetLine = false,
+		predictionEnabled = true,
+		predictionMode = "Smart",
+		leadPing = 100,
+		leadExtra = 40,
+		leadMax = 22,
+		predictionWindow = 180,
+		accelWeight = 35,
+		airPrediction = true,
+		autoTune = true,
+		predictionMarker = true,
+		legacyRedirect = false,
+		profilesEnabled = true,
+		miniHeight = 4,
+		spamJumpCount = 2,
+		spamJumpDamp = 35,
+		camperTime = 400,
+		stillThreshold = 8,
+		reverseDamp = 50,
+		verticalCap = 12,
+		gunEsp = true,
+		gunEspTracer = true,
+		gunEspChams = true,
+		gunAlert = true,
+		leadWallClamp = true,
+		partFallback = true,
+		headMaxLead = 2,
+		showGunButton = true,
+		gunGrabMethod = "Auto",
+		gunKeybind = "None",
+		silentKeybind = "None",
+		shootKeybind = "None",
+		showSilentButton = true,
+		showShootButton = true,
+		bombJumpEnabled = false,
+		bombCooldown = 22,
+		showBombButton = true,
+		goldBombJumpEnabled = false,
+		goldBombCooldown = 4,
+		showGoldButton = true,
+		theme = "Overdrive",
+		watermark = true,
+		launcher = IS_TOUCH,
+		uiScale = IS_TOUCH and 85 or 100,
+		autoLoad = true,
+		intro = true,
+	},
+}
+
+local DEFAULT_CONFIG = table.clone(State.config)
+
+-- Allowed ranges and choices. A hand-edited or outdated saved config is pulled back inside them,
+-- so a hit chance of 0, a negative lead or a typo in a mode name can never reach the aim.
+local CONFIG_LIMITS = {
+	espMaxDistance = { 100, 3000 },
+	silentFov = { 50, 900 },
+	silentMaxDistance = { 100, 2000 },
+	hitChance = { 1, 100 },
+	leadPing = { 0, 200 },
+	leadExtra = { 0, 200 },
+	leadMax = { 5, 60 },
+	predictionWindow = { 80, 300 },
+	accelWeight = { 0, 100 },
+	reverseDamp = { 0, 100 },
+	verticalCap = { 4, 24 },
+	miniHeight = { 2, 6 },
+	spamJumpCount = { 2, 5 },
+	spamJumpDamp = { 0, 100 },
+	camperTime = { 100, 1500 },
+	stillThreshold = { 1, 30 },
+	headMaxLead = { 0, 8 },
+	bombCooldown = { 1, 60 },
+	goldBombCooldown = { 1, 30 },
+	uiScale = { 60, 120 },
+}
+
+local CONFIG_CHOICES = {
+	hitPart = OPTIONS.hitParts,
+	priority = OPTIONS.priority,
+	predictionMode = OPTIONS.modes,
+	gunGrabMethod = OPTIONS.grab,
+	silentKeybind = OPTIONS.keys,
+	shootKeybind = OPTIONS.keys,
+	gunKeybind = OPTIONS.keys,
+	theme = THEME_NAMES,
+}
+
+local function sanitizeConfig()
+	for key, limits in CONFIG_LIMITS do
+		local value = State.config[key]
+
+		-- A NaN is the only number that is not equal to itself.
+		if typeof(value) ~= "number" or value ~= value then
+			State.config[key] = DEFAULT_CONFIG[key]
+		else
+			State.config[key] = math.clamp(value, limits[1], limits[2])
+		end
+	end
+
+	for key, choices in CONFIG_CHOICES do
+		if not table.find(choices, State.config[key]) then
+			State.config[key] = DEFAULT_CONFIG[key]
+		end
+	end
+end
+
+---Show a toast once the interface exists. Safe to call at any time.
+---@param title string
+---@param message string
+---@param kind string?
+local function notify(title, message, kind)
+	if State.notifyImpl then
+		State.notifyImpl(title, message, kind)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Roles. GetPlayerData reports every role, so roles are known before a weapon is drawn.
+--------------------------------------------------------------------------------
+
+local Roles = {
+	entries = {},
+	murderer = nil,
+	remote = nil,
+	lastRequest = 0,
+	lastApplied = 0,
+	fetching = false,
+}
+
+---Fold the server's role table into a cache.
+---@param result table
+function Roles.apply(result)
+	local entries, murderer = {}, nil
+
+	for name, info in result do
+		if typeof(name) == "string" and typeof(info) == "table" then
+			local role = typeof(info.Role) == "string" and info.Role or "Innocent"
+
+			if role == "Hero" then
+				role = "Sheriff"
+			end
+
+			entries[name] = { role = role, alive = not (info.Killed or info.Dead) }
+
+			if role == "Murderer" then
+				murderer = name
+			end
+		end
+	end
+
+	Roles.entries = entries
+	Roles.murderer = murderer
+	Roles.lastApplied = os.clock()
+end
+
+---Find the GetPlayerData remote function.
+---@return RemoteFunction?
+function Roles.findRemote()
+	if Roles.remote and Roles.remote.Parent then
+		return Roles.remote
+	end
+
+	local found = replicatedStorage:FindFirstChild("GetPlayerData", true)
+	Roles.remote = found and found:IsA("RemoteFunction") and found or nil
+	return Roles.remote
+end
+
+---Ask the server for roles. Rate limited, never blocks the caller, and times out.
+function Roles.refresh()
+	if Roles.fetching or os.clock() - Roles.lastRequest < ROLE_REFRESH then
+		return
+	end
+
+	local remote = Roles.findRemote()
+	if not remote then
+		return
+	end
+
+	Roles.fetching = true
+	Roles.lastRequest = os.clock()
+
+	task.spawn(function()
+		local finished, result = false, nil
+
+		task.spawn(function()
+			local success, value = pcall(remote.InvokeServer, remote)
+
+			if success then
+				result = value
+			end
+
+			finished = true
+		end)
+
+		local deadline = os.clock() + ROLE_TIMEOUT
+
+		while not finished and os.clock() < deadline do
+			task.wait(0.05)
+		end
+
+		Roles.fetching = false
+
+		if finished and typeof(result) == "table" then
+			Roles.apply(result)
+		end
+	end)
+end
+
+---Find a weapon in either the equipped Character or unequipped Backpack.
+---@param player Player
+---@param weaponName string
+---@return boolean
+local function hasPlayerWeapon(player, weaponName)
+	local character = player.Character
+	local backpack = player:FindFirstChildOfClass("Backpack")
+
+	return (character ~= nil and character:FindFirstChild(weaponName) ~= nil)
+		or (backpack ~= nil and backpack:FindFirstChild(weaponName) ~= nil)
+end
+
+---Infer role from the player's inventory, including unequipped tools.
+---@param player Player
+---@return string?
+local function toolRole(player)
+	if hasPlayerWeapon(player, "Knife") then
+		return "Murderer"
+	end
+
+	if hasPlayerWeapon(player, "Gun") then
+		return "Sheriff"
+	end
+
+	return nil
+end
+
+---Role and alive flag of a player.
+---@param player Player
+---@return string, boolean
+function Roles.of(player)
+	-- Inventory evidence takes priority so unequipped Knife/Gun tools are detected.
+	local inventoryRole = toolRole(player)
+
+	if inventoryRole then
+		local entry = Roles.entries[player.Name]
+		return inventoryRole, not (entry and entry.alive == false)
+	end
+
+	local entry = Roles.entries[player.Name]
+
+	if entry and os.clock() - Roles.lastApplied < ROLE_FRESH then
+		return entry.role, entry.alive
+	end
+
+	return "Innocent", true
+end
+
+---The current murderer, or nil.
+---@return Player?
+function Roles.murdererPlayer()
+	if Roles.murderer and os.clock() - Roles.lastApplied < ROLE_FRESH then
+		return playersService:FindFirstChild(Roles.murderer)
+	end
+
+	for _, player in playersService:GetPlayers() do
+		if player ~= localPlayer and toolRole(player) == "Murderer" then
+			return player
+		end
+	end
+
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Ping and motion tracking.
+--------------------------------------------------------------------------------
+
+local Ping = { rttSeconds = 0.08 }
+
+---Sample the round-trip time and smooth it.
+function Ping.update()
+	local success, milliseconds = pcall(function()
+		return statsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+	end)
+
+	local seconds = success and typeof(milliseconds) == "number" and milliseconds / 1000 or 0
+
+	if seconds <= 0 then
+		local ok, oneWay = pcall(function()
+			return localPlayer:GetNetworkPing()
+		end)
+
+		seconds = ok and typeof(oneWay) == "number" and oneWay * 2 or 0
+	end
+
+	if seconds > 0 then
+		Ping.rttSeconds += (seconds - Ping.rttSeconds) * PING_SMOOTHING
+	end
+end
+
+local Tracker = { histories = {} }
+
+---Record where a player is right now.
+---@param player Player
+---@param hrp BasePart
+function Tracker.record(player, hrp)
+	local history = Tracker.histories[player]
+
+	if not history then
+		history = {}
+		Tracker.histories[player] = history
+	end
+
+	local now = os.clock()
+	table.insert(history, { t = now, p = hrp.Position })
+
+	while history[1] and (#history > MAX_SAMPLES or now - history[1].t > SAMPLE_WINDOW) do
+		table.remove(history, 1)
+	end
+end
+
+---Interpolated position at a past time.
+---@param history table
+---@param time number
+---@return Vector3
+function Tracker.positionAt(history, time)
+	local count = #history
+
+	if time <= history[1].t then
+		return history[1].p
+	end
+
+	if time >= history[count].t then
+		return history[count].p
+	end
+
+	for index = count - 1, 1, -1 do
+		local before = history[index]
+
+		if before.t <= time then
+			local after = history[index + 1]
+			local span = after.t - before.t
+
+			if span <= 0 then
+				return before.p
+			end
+
+			return before.p:Lerp(after.p, (time - before.t) / span)
+		end
+	end
+
+	return history[1].p
+end
+
+---Velocity over a span, fitted through every sample with newer samples weighing more. Two end
+---points are noisy at low frame rates, a weighted fit is not.
+---@param history table
+---@param from number
+---@param to number
+---@return Vector3?, number?
+local function fitVelocity(history, from, to)
+	local samples, count = {}, 0
+
+	for index = #history, 1, -1 do
+		local sample = history[index]
+
+		if sample.t < from then
+			break
+		end
+
+		if sample.t <= to then
+			count += 1
+			samples[count] = sample
+		end
+	end
+
+	if count < 3 then
+		return nil, nil
+	end
+
+	local tau = math.max((to - from) / 2, 0.02)
+	local weightSum, timeSum, positionSum = 0, 0, Vector3.zero
+
+	for _, sample in samples do
+		local weight = math.exp(-(to - sample.t) / tau)
+		weightSum += weight
+		timeSum += weight * sample.t
+		positionSum += weight * sample.p
+	end
+
+	local meanTime = timeSum / weightSum
+	local meanPosition = positionSum / weightSum
+	local variance, covariance = 0, Vector3.zero
+
+	for _, sample in samples do
+		local weight = math.exp(-(to - sample.t) / tau)
+		local dt = sample.t - meanTime
+		variance += weight * dt * dt
+		covariance += weight * dt * (sample.p - meanPosition)
+	end
+
+	if variance < 1e-6 then
+		return nil, nil
+	end
+
+	return covariance / variance, meanTime
+end
+
+---Velocity, acceleration, whether the player just reversed, and how steady the heading is (0 to 1).
+---@param player Player
+---@param window number
+---@return Vector3, Vector3, boolean, number
+function Tracker.motion(player, window)
+	local history = Tracker.histories[player]
+
+	if not history or #history < 4 then
+		return Vector3.zero, Vector3.zero, false, 1
+	end
+
+	local now = history[#history].t
+
+	if now - history[1].t < window * 0.6 then
+		return Vector3.zero, Vector3.zero, false, 1
+	end
+
+	local recent, recentTime = fitVelocity(history, now - window, now)
+
+	if not recent then
+		return Vector3.zero, Vector3.zero, false, 1
+	end
+
+	local older, olderTime = fitVelocity(history, now - window * 2, now - window)
+
+	if not older or recentTime - olderTime < 0.02 then
+		return recent, Vector3.zero, false, 1
+	end
+
+	local acceleration = (recent - older) / (recentTime - olderTime)
+	local reversing = recent.Magnitude > 2 and older.Magnitude > 2 and recent:Dot(older) < 0
+	local stability = 1
+
+	if recent.Magnitude > 1 and older.Magnitude > 1 then
+		stability = math.clamp(0.5 + 0.5 * recent.Unit:Dot(older.Unit), 0, 1)
+	end
+
+	return recent, acceleration, reversing, stability
+end
+
+---Average position over the most recent window, or nil without enough samples.
+---@param player Player
+---@param window number
+---@return Vector3?
+function Tracker.meanPosition(player, window)
+	local history = Tracker.histories[player]
+
+	if not history or #history < 3 then
+		return nil
+	end
+
+	local cutoff = history[#history].t - window
+	local sum, count = Vector3.zero, 0
+
+	for index = #history, 1, -1 do
+		local sample = history[index]
+
+		if sample.t < cutoff then
+			break
+		end
+
+		sum += sample.p
+		count += 1
+	end
+
+	if count < 3 then
+		return nil
+	end
+
+	return sum / count
+end
+
+--------------------------------------------------------------------------------
+-- Target profiles. Mini avatars, spam jumpers and campers each break the plain "lead by
+-- velocity" model in a different way, so they are detected per target. Every threshold below
+-- comes from the live config, nothing is hardcoded.
+--------------------------------------------------------------------------------
+
+local Profiles = { cache = {} }
+
+---@param player Player
+---@return table
+local function profileEntry(player)
+	local entry = Profiles.cache[player]
+
+	if not entry then
+		entry = {
+			height = 5.4,
+			heightAt = -math.huge,
+			jumps = {},
+			wasAir = false,
+			stillSince = nil,
+			mini = false,
+			spam = false,
+			camper = false,
+		}
+
+		Profiles.cache[player] = entry
+	end
+
+	return entry
+end
+
+---Record per-frame evidence for a player: take-offs and how long they have stood still.
+---@param player Player
+---@param humanoid Humanoid?
+---@param now number
+function Profiles.observe(player, humanoid, now)
+	local entry = profileEntry(player)
+	local air = humanoid ~= nil and humanoid.FloorMaterial == Enum.Material.Air
+
+	if air and not entry.wasAir then
+		table.insert(entry.jumps, now)
+	end
+
+	entry.wasAir = air
+
+	while entry.jumps[1] and now - entry.jumps[1] > 2 do
+		table.remove(entry.jumps, 1)
+	end
+
+	local velocity = Tracker.motion(player, 0.18)
+	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	local walkSpeed = humanoid and humanoid.WalkSpeed or 16
+	local stillSpeed = math.max(walkSpeed * State.config.stillThreshold / 100, 0.5)
+
+	if speed <= stillSpeed and not air then
+		entry.stillSince = entry.stillSince or now
+	else
+		entry.stillSince = nil
+	end
+end
+
+---Profile flags of a player. Height is re-measured once a second.
+---@param player Player
+---@param character Model?
+---@return table
+function Profiles.get(player, character)
+	local config = State.config
+	local now = os.clock()
+	local entry = profileEntry(player)
+
+	if character and now - entry.heightAt > 1 then
+		entry.heightAt = now
+
+		local success, _, size = pcall(function()
+			return character:GetBoundingBox()
+		end)
+
+		if success and typeof(size) == "Vector3" and size.Y > 0.5 then
+			entry.height = math.clamp(size.Y, 1, 14)
+		end
+	end
+
+	local recentJumps = 0
+
+	for _, takeoff in entry.jumps do
+		if now - takeoff <= 1.6 then
+			recentJumps += 1
+		end
+	end
+
+	entry.mini = entry.height < config.miniHeight
+	entry.spam = recentJumps >= config.spamJumpCount
+	entry.camper = entry.stillSince ~= nil and now - entry.stillSince >= config.camperTime / 1000
+	return entry
+end
+
+--------------------------------------------------------------------------------
+-- Prediction. The position you see lags the server by your round trip and the target's own
+-- latency, and the shot lands one way later, so the lead is built from the round trip.
+--------------------------------------------------------------------------------
+
+local Predictor = { tune = 1, pending = {}, lastQueue = 0, lastLead = 0, lastSpeed = 0 }
+
+---Seconds to lead the target by.
+---@return number
+function Predictor.leadTime()
+	local config = State.config
+	return math.clamp(Ping.rttSeconds, 0, 0.6) * (config.leadPing / 100) + config.leadExtra / 1000
+end
+
+---Predict where a player will be when the shot lands. Every threshold is a config value.
+---@param player Player
+---@param part BasePart
+---@return Vector3, number, Vector3
+function Predictor.predict(player, part)
+	local config = State.config
+	local actual = part.Position
+
+	if not config.predictionEnabled then
+		return actual, 0, Vector3.zero
+	end
+
+	local lead = Predictor.leadTime()
+	Predictor.lastLead = lead
+
+	if lead <= 0 then
+		return actual, 0, Vector3.zero
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local profile = config.profilesEnabled and hrp and Profiles.get(player, character) or nil
+	local velocity, acceleration, _, stability = Tracker.motion(player, config.predictionWindow / 1000)
+	local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+	local speed = horizontal.Magnitude
+	Predictor.lastSpeed = speed
+
+	-- A huge speed is a teleport or a fling, leading it would aim at nothing.
+	local walkSpeed = humanoid and humanoid.WalkSpeed or 16
+
+	if speed > math.max(walkSpeed * 3, 60) then
+		return actual, lead, Vector3.zero
+	end
+
+	local camping = profile ~= nil and profile.camper
+
+	-- A camper is not moving, so average out the network jitter instead of chasing it.
+	if camping then
+		local mean = Tracker.meanPosition(player, 0.3)
+
+		if mean then
+			actual = mean + (part.Position - hrp.Position)
+		end
+	end
+
+	local model = Vector3.zero
+	local stillSpeed = math.max(walkSpeed * config.stillThreshold / 100, 0.5)
+
+	if not camping and speed > stillSpeed then
+		model = horizontal * lead
+
+		if config.predictionMode == "Smart" then
+			local flat = Vector3.new(acceleration.X, 0, acceleration.Z)
+			local accelerationTerm = flat * (0.5 * lead * lead) * (config.accelWeight / 100)
+			local limit = model.Magnitude * 0.5
+
+			if accelerationTerm.Magnitude > limit and limit > 0 then
+				accelerationTerm = accelerationTerm.Unit * limit
+			end
+
+			model += accelerationTerm
+
+			-- Erratic or reversing movement makes a straight line unreliable, so lead less of it.
+			model *= 1 - (1 - stability) * config.reverseDamp / 100
+
+			-- Slowing down must never turn into aiming behind the target.
+			if model:Dot(horizontal) < 0 then
+				model = Vector3.zero
+			end
+		end
+	end
+
+	local displacement = model * Predictor.tune
+
+	if displacement.Magnitude > config.leadMax then
+		displacement = displacement.Unit * config.leadMax
+	end
+
+	-- Stop the lead at the first wall, aiming into geometry is a guaranteed miss.
+	if config.leadWallClamp and displacement.Magnitude > 0.5 then
+		local ignore = { character }
+
+		if localPlayer.Character then
+			table.insert(ignore, localPlayer.Character)
+		end
+
+		if workspace.CurrentCamera then
+			table.insert(ignore, workspace.CurrentCamera)
+		end
+
+		leadParams.FilterDescendantsInstances = ignore
+		local result = workspace:Raycast(actual, displacement, leadParams)
+
+		if result then
+			local allowed = math.max((result.Position - actual).Magnitude - 0.6, 0)
+			displacement = displacement.Unit * allowed
+		end
+	end
+
+	-- Small avatars jump lower, so the vertical cap shrinks with their height.
+	local heightScale = profile and math.clamp(profile.height / 5.4, 0.4, 1.3) or 1
+	local verticalCap = config.verticalCap * heightScale
+	local vertical = 0
+
+	if config.airPrediction and humanoid and humanoid.FloorMaterial == Enum.Material.Air then
+		vertical = math.clamp(velocity.Y * lead - 0.5 * workspace.Gravity * lead * lead, -verticalCap, verticalCap)
+	end
+
+	local base = actual + displacement
+
+	if profile and profile.spam then
+		-- A spam jumper changes height every few frames, so aim at the middle of the arc.
+		local mean = Tracker.meanPosition(player, 0.45)
+
+		if mean then
+			base = Vector3.new(base.X, mean.Y + (actual.Y - hrp.Position.Y), base.Z)
+		end
+
+		vertical *= config.spamJumpDamp / 100
+	end
+
+	return base + Vector3.new(0, vertical, 0), lead, model
+end
+
+---Remember a prediction so it can be compared with where the target really went.
+---@param player Player
+---@param model Vector3
+---@param lead number
+function Predictor.queue(player, model, lead)
+	if not State.config.autoTune or model.Magnitude < 3 or lead <= 0 then
+		return
+	end
+
+	local now = os.clock()
+
+	if now - Predictor.lastQueue < 0.3 or #Predictor.pending >= 6 then
+		return
+	end
+
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+	if not hrp then
+		return
+	end
+
+	Predictor.lastQueue = now
+	table.insert(Predictor.pending, { hrp = hrp, base = hrp.Position, model = model, due = now + lead })
+end
+
+---Compare finished predictions with reality and nudge the lead gain towards what was observed.
+function Predictor.resolve()
+	if #Predictor.pending == 0 then
+		return
+	end
+
+	local now = os.clock()
+
+	for index = #Predictor.pending, 1, -1 do
+		local entry = Predictor.pending[index]
+
+		if now >= entry.due then
+			table.remove(Predictor.pending, index)
+
+			if entry.hrp.Parent then
+				local actual = entry.hrp.Position - entry.base
+				local length = entry.model.Magnitude
+
+				if length > 0.001 then
+					local ideal = math.clamp(actual:Dot(entry.model.Unit) / length, TUNE_MIN, TUNE_MAX)
+					Predictor.tune = math.clamp(Predictor.tune + (ideal - Predictor.tune) * 0.12, TUNE_MIN, TUNE_MAX)
+				end
+			end
+		end
+	end
+end
+
+---Forget everything learned so far.
+function Predictor.reset()
+	Predictor.tune = 1
+	table.clear(Predictor.pending)
+end
+
+--------------------------------------------------------------------------------
+-- Target selection.
+--------------------------------------------------------------------------------
+
+---@param character Model
+---@param part BasePart
+---@return boolean
+local function isVisible(character, part)
+	local camera = workspace.CurrentCamera
+	local origin = camera.CFrame.Position
+	local filter = { camera }
+
+	if localPlayer.Character then
+		table.insert(filter, localPlayer.Character)
+	end
+
+	wallParams.FilterDescendantsInstances = filter
+	local result = workspace:Raycast(origin, part.Position - origin, wallParams)
+	return result == nil or result.Instance:IsDescendantOf(character)
+end
+
+---@param humanoid Humanoid
+---@param screenDistance number
+---@param worldDistance number
+---@return number
+local function scoreOf(humanoid, screenDistance, worldDistance)
+	local priority = State.config.priority
+
+	if priority == "Distance" then
+		return worldDistance
+	end
+
+	if priority == "Health" then
+		return humanoid.Health
+	end
+
+	return screenDistance
+end
+
+---Choose the player to aim at.
+---@param camera Camera
+---@return Player?
+local function pickTarget(camera)
+	local config = State.config
+	local center = camera.ViewportSize / 2
+	local cameraPosition = camera.CFrame.Position
+	local candidates = {}
+
+	for _, player in playersService:GetPlayers() do
+		if player == localPlayer then
+			continue
+		end
+
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+		if not (humanoid and hrp and humanoid.Health > 0) then
+			continue
+		end
+
+		local role, alive = Roles.of(player)
+
+		if not alive or (config.silentMurdererOnly and role ~= "Murderer") then
+			continue
+		end
+
+		local worldDistance = (hrp.Position - cameraPosition).Magnitude
+
+		if worldDistance > config.silentMaxDistance then
+			continue
+		end
+
+		local screenPosition, onScreen = camera:WorldToViewportPoint(hrp.Position)
+		local screenDistance = (Vector2.new(screenPosition.X, screenPosition.Y) - center).Magnitude
+
+		if config.silentUseFov and (not onScreen or screenDistance > config.silentFov) then
+			continue
+		end
+
+		if config.wallCheck and not isVisible(character, hrp) then
+			continue
+		end
+
+		table.insert(candidates, { player = player, score = scoreOf(humanoid, screenDistance, worldDistance) })
+	end
+
+	local best, bestScore = nil, math.huge
+
+	for _, info in candidates do
+		if info.score < bestScore then
+			best, bestScore = info.player, info.score
+		end
+	end
+
+	local previous = State.targetPlayer
+
+	if config.stickyTarget and previous and best ~= previous then
+		for _, info in candidates do
+			if info.player == previous and bestScore >= info.score * STICKY_MARGIN then
+				best = previous
+				break
+			end
+		end
+	end
+
+	return best
+end
+
+---The body part to aim at for the chosen hit mode.
+---@param player Player
+---@return BasePart?
+local function chooseAimPart(player)
+	local character = player.Character
+
+	if not character then
+		return nil
+	end
+
+	local mode = State.config.hitPart
+	local head = character:FindFirstChild("Head")
+	local torso = character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+
+	-- Mini avatars and spam jumpers make the head a poor target, so the automatic modes fall back
+	-- to the big stable torso hitbox for them. An explicit Head or Torso choice is always obeyed.
+	local profile = State.config.profilesEnabled and Profiles.get(player, character) or nil
+	local hardHead = profile ~= nil and (profile.mini or profile.spam)
+
+	if mode == "Torso" then
+		return torso
+	end
+
+	if mode == "Random" then
+		if hardHead then
+			return torso
+		end
+
+		return (State.headRoll and head) or torso
+	end
+
+	if mode == "Auto" then
+		if hardHead then
+			return torso
+		end
+
+		-- One hit kills, so the big torso is the safer target. The head is only worth taking when
+		-- the lead is small enough that the smaller hitbox will still be hit.
+		local velocity = Tracker.motion(player, State.config.predictionWindow / 1000)
+		local expectedLead = Vector3.new(velocity.X, 0, velocity.Z).Magnitude * Predictor.leadTime()
+
+		if head and expectedLead <= State.config.headMaxLead and isVisible(character, head) then
+			return head
+		end
+
+		return torso
+	end
+
+	return head or torso
+end
+
+---Prefer the chosen part, but when a wall hides it and another part of the same body is in view,
+---aim at the visible one so a peeking target can still be hit.
+---@param player Player
+---@return BasePart?
+local function getAimPart(player)
+	local chosen = chooseAimPart(player)
+	local character = player.Character
+
+	if not (chosen and character and State.config.partFallback) or isVisible(character, chosen) then
+		return chosen
+	end
+
+	for _, name in AIM_FALLBACK_ORDER do
+		local candidate = character:FindFirstChild(name)
+
+		if candidate and candidate ~= chosen and candidate:IsA("BasePart") and isVisible(character, candidate) then
+			return candidate
+		end
+	end
+
+	return chosen
+end
+
+---@return boolean
+local function isHoldingGun()
+	local character = localPlayer.Character
+	return character ~= nil and character:FindFirstChild("Gun") ~= nil
+end
+
+---@return boolean
+local function hasGunAnywhere()
+	if isHoldingGun() then
+		return true
+	end
+
+	local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+	return backpack ~= nil and backpack:FindFirstChild("Gun") ~= nil
+end
+
+--------------------------------------------------------------------------------
+-- Silent aim. The gun fires Shoot:FireServer(originCFrame, targetCFrame), so the second CFrame is
+-- replaced with the predicted position. The hook is installed once per session and re-pointed on
+-- every execution, so running the script again never stacks hooks.
+--------------------------------------------------------------------------------
+
+local Silent = { shootRemote = nil, lastSearch = 0, pending = {}, hits = 0, total = 0 }
+
+---Find the Shoot RemoteEvent.
+---@return RemoteEvent?
+function Silent.findRemote()
+	if Silent.shootRemote and Silent.shootRemote.Parent then
+		return Silent.shootRemote
+	end
+
+	if os.clock() - Silent.lastSearch < 2 then
+		return nil
+	end
+
+	Silent.lastSearch = os.clock()
+
+	local function search(root)
+		if not root then
+			return nil
+		end
+
+		for _, descendant in root:GetDescendants() do
+			if descendant.Name == "Shoot" and descendant:IsA("RemoteEvent") then
+				return descendant
+			end
+		end
+
+		return nil
+	end
+
+	local character = localPlayer.Character
+	local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+	local gun = (character and character:FindFirstChild("Gun")) or (backpack and backpack:FindFirstChild("Gun"))
+
+	Silent.shootRemote = search(replicatedStorage) or search(gun)
+
+	if not Silent.shootRemote and getnilinstances then
+		local success, instances = pcall(getnilinstances)
+
+		if success and typeof(instances) == "table" then
+			for _, instance in instances do
+				if instance.Name == "Shoot" and instance:IsA("RemoteEvent") then
+					Silent.shootRemote = instance
+					break
+				end
+			end
+		end
+	end
+
+	return Silent.shootRemote
+end
+
+---Remember a shot so it can be scored once the target is dead or the shot has clearly missed.
+---@param player Player
+function Silent.logShot(player)
+	table.insert(Silent.pending, { player = player, time = os.clock() })
+
+	if #Silent.pending > 20 then
+		table.remove(Silent.pending, 1)
+	end
+end
+
+---Score finished shots: a dead target within a second of the shot counts as a hit.
+function Silent.resolveShots()
+	if #Silent.pending == 0 then
+		return
+	end
+
+	local now = os.clock()
+
+	for index = #Silent.pending, 1, -1 do
+		local shot = Silent.pending[index]
+		local character = shot.player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+		if not humanoid or humanoid.Health <= 0 then
+			Silent.hits += 1
+			Silent.total += 1
+			table.remove(Silent.pending, index)
+		elseif now - shot.time > 1.2 then
+			Silent.total += 1
+			table.remove(Silent.pending, index)
+		end
+	end
+end
+
+---Redirect a shot's target CFrame. Returns the new arguments, or nil to leave the shot alone.
+---Uses property reads only, a method call here would change the namecall method.
+---@param remote Instance
+---@return table?
+function Silent.redirect(remote, ...)
+	local config = State.config
+
+	if not (config.silentAim and State.holdingGun and State.hitRoll) then
+		return nil
+	end
+
+	if remote.ClassName ~= "RemoteEvent" or not string.find(string.lower(remote.Name), "shoot", 1, true) then
+		return nil
+	end
+
+	local args = table.pack(...)
+
+	if typeof(args[1]) ~= "CFrame" or typeof(args[2]) ~= "CFrame" then
+		return nil
+	end
+
+	local target = State.target
+
+	if not target then
+		return nil
+	end
+
+	-- Recompute at the moment of firing so the lead uses the newest motion data.
+	local success, position = pcall(Predictor.predict, target.player, target.part)
+
+	if not success or typeof(position) ~= "Vector3" then
+		position = target.aimPosition
+	end
+
+	args[2] = CFrame.new(position)
+	State.shotsRedirected += 1
+	Silent.logShot(target.player)
+	return args
+end
+
+---Legacy redirect of ray based aiming, only used when the toggle is on.
+---@param self Instance
+---@param method string
+---@return table?
+function Silent.redirectRay(self, method, ...)
+	local target = State.target
+
+	if not (State.config.legacyRedirect and target and State.holdingGun and State.hitRoll) then
+		return nil
+	end
+
+	local aimPosition = target.aimPosition
+
+	if self ~= workspace then
+		return nil
+	end
+
+	local args = table.pack(...)
+
+	if RAY_METHODS[method] then
+		local ray = args[1]
+
+		if typeof(ray) == "Ray" and ray.Direction.Magnitude >= MIN_RAY_LENGTH then
+			local offset = aimPosition - ray.Origin
+			args[1] = Ray.new(ray.Origin, offset.Unit * ray.Direction.Magnitude)
+			return args
+		end
+	elseif method == "Raycast" then
+		local origin, direction = args[1], args[2]
+
+		if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" and direction.Magnitude >= MIN_RAY_LENGTH then
+			args[2] = (aimPosition - origin).Unit * direction.Magnitude
+			return args
+		end
+	end
+
+	return nil
+end
+
+---@param original function
+---@param self any
+local function namecallHandler(original, self, ...)
+	local method = getnamecallmethod()
+	local config = State.config
+
+	-- Nearly every call in the game passes through here, so anything this script does not care
+	-- about is handed straight back before any other work is done.
+	if State.detached or not (config.silentAim or config.legacyRedirect) then
+		return original(self, ...)
+	end
+
+	if method ~= "FireServer" and not config.legacyRedirect then
+		return original(self, ...)
+	end
+
+	if checkcaller() then
+		return original(self, ...)
+	end
+
+	if typeof(self) == "Instance" then
+		local arguments = nil
+
+		-- Camera rays are redirected after the fact, because the answer is the ray itself.
+		if State.config.legacyRedirect and (method == "ScreenPointToRay" or method == "ViewportPointToRay") then
+			local target = State.target
+
+			if target and State.holdingGun and State.hitRoll and self == workspace.CurrentCamera then
+				if setnamecallmethod then
+					setnamecallmethod(method)
+				end
+
+				local ray = original(self, ...)
+
+				if typeof(ray) == "Ray" then
+					local offset = target.aimPosition - ray.Origin
+
+					if offset.Magnitude > 0.001 then
+						return Ray.new(ray.Origin, offset.Unit * ray.Direction.Magnitude)
+					end
+				end
+
+				return ray
+			end
+		end
+
+		if method == "FireServer" then
+			arguments = Silent.redirect(self, ...)
+		elseif State.config.legacyRedirect then
+			arguments = Silent.redirectRay(self, method, ...)
+		end
+
+		if arguments then
+			if setnamecallmethod then
+				setnamecallmethod(method)
+			end
+
+			return original(self, table.unpack(arguments, 1, arguments.n))
+		end
+	end
+
+	return original(self, ...)
+end
+
+---@param original function
+---@param self any
+---@param key any
+local function indexHandler(original, self, key)
+	local target = State.target
+
+	if State.detached or not State.config.legacyRedirect or not target or not State.holdingGun or checkcaller() then
+		return original(self, key)
+	end
+
+	local mouse = State.mouse
+
+	if self ~= mouse then
+		return original(self, key)
+	end
+
+	if key == "Hit" then
+		return CFrame.new(target.aimPosition)
+	elseif key == "Target" then
+		return target.part
+	end
+
+	return original(self, key)
+end
+
+---The __index hook sees every property read in the game, so it is only installed once the legacy
+---redirect is actually switched on.
+function Silent.ensureIndexHook()
+	local registry = shared.AstraHubMM2Hooks
+
+	if not (registry and hookmetamethod) then
+		return
+	end
+
+	if not registry.indexHooked then
+		registry.indexHooked = true
+
+		local originalIndex
+		originalIndex = hookmetamethod(game, "__index", wrapClosure(function(self, key)
+			local handler = registry.index
+
+			if handler then
+				return handler(originalIndex, self, key)
+			end
+
+			return originalIndex(self, key)
+		end))
+	end
+
+	State.mouse = State.mouse or localPlayer:GetMouse()
+	registry.index = indexHandler
+end
+
+---Install the namecall hook once and point it at this instance.
+---@return boolean
+function Silent.install()
+	if not (hookmetamethod and getnamecallmethod and checkcaller) then
+		return false
+	end
+
+	local registry = shared.AstraHubMM2Hooks
+
+	if not registry then
+		registry = { namecall = nil, index = nil, indexHooked = false }
+		shared.AstraHubMM2Hooks = registry
+
+		local originalNamecall
+		originalNamecall = hookmetamethod(game, "__namecall", wrapClosure(function(self, ...)
+			local handler = registry.namecall
+
+			if handler then
+				return handler(originalNamecall, self, ...)
+			end
+
+			return originalNamecall(self, ...)
+		end))
+	end
+
+	State.mouse = localPlayer:GetMouse()
+	registry.namecall = namecallHandler
+
+	if State.config.legacyRedirect then
+		Silent.ensureIndexHook()
+	end
+
+	State.hookInstalled = true
+	return true
+end
+
+---Remove this instance from the hooks.
+function Silent.uninstall()
+	local registry = shared.AstraHubMM2Hooks
+
+	if registry then
+		registry.namecall = nil
+		registry.index = nil
+	end
+
+	State.hookInstalled = false
+end
+
+---Equip the gun and fire one predicted shot at whoever the current settings choose.
+---@return boolean, string?
+function Silent.fire()
+	if State.detached then
+		return false, "Hub is unloaded"
+	end
+
+	if os.clock() - State.lastShot < SHOOT_DEBOUNCE then
+		return false, "Too fast"
+	end
+
+	local character = localPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+	if not (character and humanoid and humanoid.Health > 0) then
+		return false, "You are not alive"
+	end
+
+	local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+	local gun = character:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
+
+	if not gun then
+		return false, "You do not have the gun"
+	end
+
+	local camera = workspace.CurrentCamera
+
+	if not camera then
+		return false, "No camera"
+	end
+
+	-- Same targeting rules as the live silent aim (murderer only, distance, FOV, wall check,
+	-- priority), so this button obeys every targeting setting instead of keeping its own.
+	local target = pickTarget(camera)
+
+	if not target then
+		return false, State.config.silentMurdererOnly and "No murderer in range" or "No target in range"
+	end
+
+	local part = getAimPart(target)
+
+	if not part then
+		return false, "No part to aim at"
+	end
+
+	local remote = Silent.findRemote()
+
+	if not remote then
+		return false, "Shoot remote not found"
+	end
+
+	if gun.Parent ~= character then
+		humanoid:EquipTool(gun)
+		task.wait(0.12)
+	end
+
+	local position = Predictor.predict(target, part)
+	local origin = camera.CFrame
+
+	State.lastShot = os.clock()
+	remote:FireServer(origin, CFrame.new(position))
+	Silent.logShot(target)
+	return true, nil
+end
+
+---Entry point for buttons and keys: an error becomes a message instead of a stack trace.
+---@return boolean, string?
+function Silent.shoot()
+	local success, ok, reason = pcall(Silent.fire)
+
+	if not success then
+		return false, tostring(ok)
+	end
+
+	return ok, reason
+end
+
+--------------------------------------------------------------------------------
+-- ESP.
+--------------------------------------------------------------------------------
+
+---@param className string
+---@return table
+local function newDrawing(className)
+	if not State.noDrawing then
+		local success, drawing = pcall(function()
+			return Drawing.new(className)
+		end)
+
+		if success and drawing then
+			return drawing
+		end
+
+		State.noDrawing = true
+	end
+
+	return setmetatable({}, {
+		__index = function(_, key)
+			if key == "Remove" or key == "Destroy" then
+				return function() end
+			end
+		end,
+		__newindex = function() end,
+	})
+end
+
+local PlayerEsp = {}
+PlayerEsp.__index = PlayerEsp
+
+---@param player Player
+function PlayerEsp.new(player)
+	local self = setmetatable({}, PlayerEsp)
+	self.player = player
+	self.highlight = nil
+	self.tag = nil
+	self.box = newDrawing("Square")
+	self.box.Thickness = 1
+	self.box.Filled = false
+	self.label = newDrawing("Text")
+	self.label.Size = 13
+	self.label.Center = true
+	self.label.Outline = true
+	self.label.Color = Color3.fromRGB(255, 255, 255)
+	self.healthBar = newDrawing("Line")
+	self.healthBar.Thickness = 2
+	self.tracer = newDrawing("Line")
+	self.tracer.Thickness = 1
+	return self
+end
+
+function PlayerEsp:hideDrawings()
+	self.box.Visible = false
+	self.label.Visible = false
+	self.healthBar.Visible = false
+	self.tracer.Visible = false
+end
+
+function PlayerEsp:hide()
+	self:hideDrawings()
+
+	if self.highlight then
+		self.highlight.Enabled = false
+	end
+
+	if self.tag then
+		self.tag.Enabled = false
+	end
+end
+
+---@param character Model
+---@param color Color3
+function PlayerEsp:updateChams(character, color)
+	if not ((State.config.espChams or State.noDrawing) and State.guiParent) then
+		if self.highlight then
+			self.highlight.Enabled = false
+		end
+
+		return
+	end
+
+	local highlight = self.highlight
+
+	if not highlight then
+		highlight = Instance.new("Highlight")
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.FillTransparency = 0.65
+		highlight.OutlineTransparency = 0
+		highlight.OutlineColor = Color3.new(1, 1, 1)
+		highlight.Parent = State.guiParent
+		self.highlight = highlight
+	end
+
+	highlight.Adornee = character
+	highlight.FillColor = color
+	highlight.Enabled = true
+end
+
+---@param character Model
+---@param text string
+function PlayerEsp:updateTag(character, text)
+	local head = character:FindFirstChild("Head")
+
+	if not (head and State.guiParent and text ~= "") then
+		if self.tag then
+			self.tag.Enabled = false
+		end
+
+		return
+	end
+
+	local tag = self.tag
+
+	if not tag then
+		tag = Instance.new("BillboardGui")
+		tag.AlwaysOnTop = true
+		tag.Size = UDim2.fromOffset(240, 22)
+		tag.StudsOffset = Vector3.new(0, 2.6, 0)
+		tag.Parent = State.guiParent
+
+		local label = Instance.new("TextLabel")
+		label.Name = "Label"
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 13
+		label.TextColor3 = Color3.new(1, 1, 1)
+		label.TextStrokeTransparency = 0
+		label.Parent = tag
+		self.tag = tag
+	end
+
+	tag.Adornee = head
+	tag.Enabled = true
+	tag.Label.Text = text
+end
+
+function PlayerEsp:update()
+	local config = State.config
+	local camera = workspace.CurrentCamera
+	local character = self.player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+	if not (config.espEnabled and camera and humanoid and hrp and humanoid.Health > 0) then
+		return self:hide()
+	end
+
+	local distance = (camera.CFrame.Position - hrp.Position).Magnitude
+
+	if distance > config.espMaxDistance then
+		return self:hide()
+	end
+
+	local role = Roles.of(self.player)
+	local color = ROLE_COLORS[role] or Color3.fromRGB(220, 220, 220)
+	self:updateChams(character, color)
+
+	local parts = {}
+
+	if config.espNames then
+		table.insert(parts, self.player.Name)
+	end
+
+	if config.espRoles then
+		table.insert(parts, "[" .. role .. "]")
+	end
+
+	if config.espWeapon then
+		if hasPlayerWeapon(self.player, "Knife") then
+			table.insert(parts, "(Knife)")
+		elseif hasPlayerWeapon(self.player, "Gun") then
+			table.insert(parts, "(Gun)")
+		end
+	end
+
+	if config.espDistance then
+		table.insert(parts, "[" .. math.floor(distance) .. "m]")
+	end
+
+	local labelText = table.concat(parts, " ")
+
+	if State.noDrawing then
+		return self:updateTag(character, labelText)
+	end
+
+	-- Drawing objects use viewport coordinates.
+	local rootPosition, onScreen = camera:WorldToViewportPoint(hrp.Position)
+
+	if not onScreen then
+		return self:hideDrawings()
+	end
+
+	-- Box height follows the real avatar size, so mini avatars no longer get a full size box.
+	local avatarHeight = Profiles.get(self.player, character).height
+	local topPosition = camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, avatarHeight * 0.55, 0))
+	local bottomPosition = camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, avatarHeight * 0.6, 0))
+	local height = math.abs(bottomPosition.Y - topPosition.Y)
+	local width = height * 0.6
+
+	self.box.Visible = config.espBoxes
+	self.box.Color = color
+	self.box.Size = Vector2.new(width, height)
+	self.box.Position = Vector2.new(rootPosition.X - width / 2, topPosition.Y)
+
+	self.label.Visible = labelText ~= ""
+	self.label.Text = labelText
+	self.label.Position = Vector2.new(rootPosition.X, topPosition.Y - 16)
+
+	local ratio = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+	local barX = rootPosition.X - width / 2 - 5
+
+	self.healthBar.Visible = config.espHealth
+	self.healthBar.Color = Color3.fromRGB(255, 0, 0):Lerp(Color3.fromRGB(0, 255, 0), ratio)
+	self.healthBar.From = Vector2.new(barX, topPosition.Y + height)
+	self.healthBar.To = Vector2.new(barX, topPosition.Y + height - height * ratio)
+
+	self.tracer.Visible = config.espTracers
+	self.tracer.Color = color
+	self.tracer.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+	self.tracer.To = Vector2.new(rootPosition.X, topPosition.Y + height)
+end
+
+function PlayerEsp:destroy()
+	self.box:Remove()
+	self.label:Remove()
+	self.healthBar:Remove()
+	self.tracer:Remove()
+
+	if self.highlight then
+		self.highlight:Destroy()
+		self.highlight = nil
+	end
+
+	if self.tag then
+		self.tag:Destroy()
+		self.tag = nil
+	end
+end
+
+---@param player Player
+local function addEsp(player)
+	if player == localPlayer or State.esp[player] then
+		return
+	end
+
+	State.esp[player] = PlayerEsp.new(player)
+end
+
+---@param player Player
+local function removePlayer(player)
+	Tracker.histories[player] = nil
+	Profiles.cache[player] = nil
+
+	local esp = State.esp[player]
+
+	if not esp then
+		return
+	end
+
+	esp:destroy()
+	State.esp[player] = nil
+end
+
+--------------------------------------------------------------------------------
+-- Gun ESP. The sheriff's gun drops on the map as "GunDrop" when they die.
+--------------------------------------------------------------------------------
+
+local GUN_COLOR = Color3.fromRGB(255, 205, 60)
+
+local GunMarker = {}
+GunMarker.__index = GunMarker
+
+---@param instance Instance
+---@return table
+function GunMarker.new(instance)
+	local self = setmetatable({}, GunMarker)
+	self.instance = instance
+	self.highlight = nil
+	self.tag = nil
+	self.label = newDrawing("Text")
+	self.label.Size = 15
+	self.label.Center = true
+	self.label.Outline = true
+	self.label.Color = GUN_COLOR
+	self.box = newDrawing("Square")
+	self.box.Thickness = 2
+	self.box.Filled = false
+	self.box.Color = GUN_COLOR
+	self.tracer = newDrawing("Line")
+	self.tracer.Thickness = 1.5
+	self.tracer.Color = GUN_COLOR
+	return self
+end
+
+---The part the marker is anchored to.
+---@return BasePart?
+function GunMarker:anchor()
+	local instance = self.instance
+
+	if not instance.Parent then
+		return nil
+	end
+
+	if instance:IsA("BasePart") then
+		return instance
+	end
+
+	local handle = instance:FindFirstChild("Handle")
+
+	if handle and handle:IsA("BasePart") then
+		return handle
+	end
+
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+function GunMarker:hide()
+	self.label.Visible = false
+	self.box.Visible = false
+	self.tracer.Visible = false
+
+	if self.highlight then
+		self.highlight.Enabled = false
+	end
+
+	if self.tag then
+		self.tag.Enabled = false
+	end
+end
+
+---@param camera Camera
+function GunMarker:update(camera)
+	local config = State.config
+	local part = self:anchor()
+
+	if not (config.gunEsp and part) then
+		return self:hide()
+	end
+
+	local position = part.Position
+	local distance = (camera.CFrame.Position - position).Magnitude
+	local text = string.format("GUN [%dm]", math.floor(distance))
+
+	if (config.gunEspChams or State.noDrawing) and State.guiParent then
+		local highlight = self.highlight
+
+		if not highlight then
+			highlight = Instance.new("Highlight")
+			highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+			highlight.FillTransparency = 0.45
+			highlight.OutlineTransparency = 0
+			highlight.FillColor = GUN_COLOR
+			highlight.OutlineColor = Color3.new(1, 1, 1)
+			highlight.Parent = State.guiParent
+			self.highlight = highlight
+		end
+
+		local instance = self.instance
+		highlight.Adornee = (instance:IsA("BasePart") or instance:IsA("Model")) and instance or part
+		highlight.Enabled = true
+	elseif self.highlight then
+		self.highlight.Enabled = false
+	end
+
+	-- Without a Drawing library a name tag on the gun stands in for the on-screen marker.
+	if State.noDrawing then
+		if not State.guiParent then
+			return
+		end
+
+		local tag = self.tag
+
+		if not tag then
+			tag = Instance.new("BillboardGui")
+			tag.AlwaysOnTop = true
+			tag.Size = UDim2.fromOffset(160, 22)
+			tag.StudsOffset = Vector3.new(0, 2, 0)
+			tag.Parent = State.guiParent
+
+			local label = Instance.new("TextLabel")
+			label.Name = "Label"
+			label.Size = UDim2.fromScale(1, 1)
+			label.BackgroundTransparency = 1
+			label.Font = Enum.Font.GothamBold
+			label.TextSize = 14
+			label.TextColor3 = GUN_COLOR
+			label.TextStrokeTransparency = 0
+			label.Parent = tag
+			self.tag = tag
+		end
+
+		tag.Adornee = part
+		tag.Enabled = true
+		tag.Label.Text = text
+		return
+	end
+
+	-- Drawing objects use viewport coordinates.
+	local screen, onScreen = camera:WorldToViewportPoint(position)
+	local viewport = camera.ViewportSize
+	local center = viewport / 2
+	local point = Vector2.new(screen.X, screen.Y)
+
+	-- A gun that is off screen sticks to the edge of the screen, pointing the way to it.
+	if not onScreen then
+		local direction = point - center
+
+		if screen.Z < 0 then
+			direction = -direction
+		end
+
+		if direction.Magnitude < 1 then
+			direction = Vector2.new(0, -1)
+		end
+
+		local scaleX = math.abs(direction.X) > 0.001 and (center.X - 40) / math.abs(direction.X) or math.huge
+		local scaleY = math.abs(direction.Y) > 0.001 and (center.Y - 40) / math.abs(direction.Y) or math.huge
+		point = center + direction * math.min(scaleX, scaleY)
+	end
+
+	self.label.Visible = true
+	self.label.Text = text
+	self.label.Position = point - Vector2.new(0, 24)
+	self.box.Visible = onScreen
+	self.box.Size = Vector2.new(18, 18)
+	self.box.Position = point - Vector2.new(9, 9)
+	self.tracer.Visible = config.gunEspTracer
+	self.tracer.From = Vector2.new(viewport.X / 2, viewport.Y)
+	self.tracer.To = point
+end
+
+function GunMarker:destroy()
+	self.label:Remove()
+	self.box:Remove()
+	self.tracer:Remove()
+
+	if self.highlight then
+		self.highlight:Destroy()
+		self.highlight = nil
+	end
+
+	if self.tag then
+		self.tag:Destroy()
+		self.tag = nil
+	end
+end
+
+local GunEsp = { markers = {}, ready = false }
+
+---@param instance Instance
+---@return boolean
+function GunEsp.isGunDrop(instance)
+	if string.lower(instance.Name) ~= "gundrop" then
+		return false
+	end
+
+	return instance:IsA("BasePart") or instance:IsA("Model") or instance:IsA("Tool")
+end
+
+---@param instance Instance
+function GunEsp.consider(instance)
+	if GunEsp.markers[instance] or not GunEsp.isGunDrop(instance) then
+		return
+	end
+
+	-- A part inside an already tracked drop is the same gun.
+	if instance.Parent and GunEsp.markers[instance.Parent] then
+		return
+	end
+
+	GunEsp.markers[instance] = GunMarker.new(instance)
+
+	if GunEsp.ready and State.config.gunAlert then
+		notify("Gun Dropped", "The sheriff's gun is on the ground.", "info")
+	end
+end
+
+---@param instance Instance
+function GunEsp.forget(instance)
+	local marker = GunEsp.markers[instance]
+
+	if marker then
+		marker:destroy()
+		GunEsp.markers[instance] = nil
+	end
+end
+
+---Track drops that appear later, and find one that is already on the map.
+function GunEsp.start()
+	State.maid:give(workspace.DescendantAdded:Connect(GunEsp.consider))
+	State.maid:give(workspace.DescendantRemoving:Connect(GunEsp.forget))
+
+	task.spawn(function()
+		local processed = 0
+
+		for _, descendant in workspace:GetDescendants() do
+			if State.detached then
+				return
+			end
+
+			GunEsp.consider(descendant)
+			processed += 1
+
+			-- Maps are large, so the first pass yields now and then instead of stalling a frame.
+			if processed % 2000 == 0 then
+				task.wait()
+			end
+		end
+
+		GunEsp.ready = true
+	end)
+end
+
+---@param camera Camera
+function GunEsp.update(camera)
+	for _, marker in GunEsp.markers do
+		marker:update(camera)
+	end
+end
+
+---The closest dropped gun, as a part you can touch.
+---@return BasePart?
+function GunEsp.nearestPart()
+	local camera = workspace.CurrentCamera
+	local origin = camera and camera.CFrame.Position
+	local bestPart, bestDistance = nil, math.huge
+
+	for _, marker in GunEsp.markers do
+		local part = marker:anchor()
+
+		if part then
+			local distance = origin and (origin - part.Position).Magnitude or 0
+
+			if distance < bestDistance then
+				bestPart, bestDistance = part, distance
+			end
+		end
+	end
+
+	return bestPart
+end
+
+---@return number?
+function GunEsp.nearestDistance()
+	local camera = workspace.CurrentCamera
+
+	if not camera then
+		return nil
+	end
+
+	local best = nil
+
+	for _, marker in GunEsp.markers do
+		local part = marker:anchor()
+
+		if part then
+			local distance = (camera.CFrame.Position - part.Position).Magnitude
+
+			if not best or distance < best then
+				best = distance
+			end
+		end
+	end
+
+	return best
+end
+
+function GunEsp.clear()
+	for instance, marker in GunEsp.markers do
+		marker:destroy()
+		GunEsp.markers[instance] = nil
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Get Gun. Picks up the dropped gun by touching it from where you stand, or by standing on it
+-- for a moment and then going straight back.
+--------------------------------------------------------------------------------
+
+local GunGrab = { busy = false }
+
+---Wait until the gun shows up in the character or backpack.
+---@param seconds number
+---@return boolean
+local function waitForGun(seconds)
+	local deadline = os.clock() + seconds
+
+	while os.clock() < deadline do
+		if State.detached then
+			return false
+		end
+
+		if hasGunAnywhere() then
+			return true
+		end
+
+		task.wait(0.05)
+	end
+
+	return hasGunAnywhere()
+end
+
+---@return boolean, string?
+function GunGrab.attempt()
+	if State.detached then
+		return false, "Hub is unloaded"
+	end
+
+	if GunGrab.busy then
+		return false, "Already grabbing the gun"
+	end
+
+	if hasGunAnywhere() then
+		return false, "You already have the gun"
+	end
+
+	local character = localPlayer.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+	if not (hrp and humanoid and humanoid.Health > 0) then
+		return false, "You are not alive"
+	end
+
+	if State.myRole == "Murderer" then
+		return false, "The murderer cannot pick up the gun"
+	end
+
+	local drop = GunEsp.nearestPart()
+
+	if not drop then
+		return false, "No gun on the map"
+	end
+
+	GunGrab.busy = true
+
+	local method = State.config.gunGrabMethod
+	local got = false
+
+	-- Touching it from where you stand does not move you at all.
+	if (method == "Auto" or method == "Touch") and firetouchinterest then
+		pcall(firetouchinterest, hrp, drop, 0)
+		pcall(firetouchinterest, hrp, drop, 1)
+		got = waitForGun(1)
+	end
+
+	-- Otherwise stand on it, then go straight back to where you were.
+	if not got and (method == "Auto" or method == "Teleport") then
+		local origin = hrp.CFrame
+
+		pcall(function()
+			hrp.CFrame = CFrame.new(drop.Position + Vector3.new(0, 3, 0))
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end)
+
+		got = waitForGun(1.5)
+
+		pcall(function()
+			hrp.CFrame = origin
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end)
+	end
+
+	GunGrab.busy = false
+
+	if got then
+		return true, nil
+	end
+
+	return false, "The gun could not be picked up"
+end
+
+---Entry point for buttons and keys. The busy flag is always released, even if something errors
+---halfway through, so one bad grab can never block every later one.
+---@return boolean, string?
+function GunGrab.run()
+	if GunGrab.busy then
+		return false, "Already grabbing the gun"
+	end
+
+	local success, ok, reason = pcall(GunGrab.attempt)
+	GunGrab.busy = false
+
+	if not success then
+		return false, tostring(ok)
+	end
+
+	return ok, reason
+end
+
+--------------------------------------------------------------------------------
+-- Bomb jump.
+--------------------------------------------------------------------------------
+
+---@param remote RemoteFunction
+---@param timeoutSeconds number
+local function invokeServerWithTimeout(remote, timeoutSeconds, ...)
+	local args = table.pack(...)
+	local finished = false
+	local bindable = Instance.new("BindableEvent")
+
+	task.spawn(function()
+		pcall(function()
+			remote:InvokeServer(table.unpack(args, 1, args.n))
+		end)
+
+		if not finished then
+			finished = true
+			bindable:Fire()
+		end
+	end)
+
+	task.delay(timeoutSeconds, function()
+		if not finished then
+			finished = true
+			bindable:Fire()
+		end
+	end)
+
+	bindable.Event:Wait()
+	bindable:Destroy()
+end
+
+---@return RemoteFunction?
+local function findReplicateToyRemote()
+	local remotes = replicatedStorage:FindFirstChild("Remotes")
+	local extras = remotes and remotes:FindFirstChild("Extras")
+	return extras and extras:FindFirstChild("ReplicateToy")
+end
+
+---@param toyName string
+---@param cooldownKey string
+---@return table
+local function createBombController(toyName, cooldownKey)
+	local controller = {
+		toyName = toyName,
+		onCooldown = false,
+		debounce = false,
+		-- Only a fresh respawn locks the throw. Starting locked meant BOMB and GOLD did nothing
+		-- until the first death after loading the script.
+		justRespawned = false,
+		label = nil,
+	}
+
+	local function resetCooldown()
+		controller.onCooldown = false
+
+		if controller.label then
+			controller.label.Text = "READY"
+		end
+	end
+
+	local function startCooldown()
+		controller.onCooldown = true
+		controller.debounce = false
+
+		local duration = math.floor(State.config[cooldownKey])
+
+		task.spawn(function()
+			for seconds = duration, 1, -1 do
+				if State.detached or not controller.onCooldown then
+					return
+				end
+
+				if controller.label then
+					controller.label.Text = tostring(seconds)
+				end
+
+				task.wait(1)
+			end
+
+			if not State.detached and controller.onCooldown then
+				resetCooldown()
+			end
+		end)
+	end
+
+	function controller.isHolding()
+		local character = localPlayer.Character
+		return character ~= nil and character:FindFirstChild(toyName) ~= nil
+	end
+
+	local function getToy()
+		local character = localPlayer.Character
+
+		if not character then
+			return nil
+		end
+
+		local tool = character:FindFirstChild(toyName)
+
+		if tool then
+			return tool
+		end
+
+		local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+
+		if backpack then
+			tool = backpack:FindFirstChild(toyName)
+
+			if tool then
+				tool.Parent = character
+				return tool
+			end
+		end
+
+		local replicateToy = findReplicateToyRemote()
+
+		if not replicateToy then
+			return nil
+		end
+
+		invokeServerWithTimeout(replicateToy, 3, toyName)
+
+		for _ = 1, BOMB_FETCH_ATTEMPTS do
+			tool = character:FindFirstChild(toyName)
+
+			if tool then
+				return tool
+			end
+
+			if backpack then
+				tool = backpack:FindFirstChild(toyName)
+
+				if tool then
+					tool.Parent = character
+					return tool
+				end
+			end
+
+			task.wait(0.05)
+		end
+
+		return nil
+	end
+
+	local function unequip()
+		task.delay(BOMB_UNEQUIP_DELAY, function()
+			if State.detached then
+				return
+			end
+
+			local character = localPlayer.Character
+			local tool = character and character:FindFirstChild(toyName)
+
+			if tool then
+				tool.Parent = localPlayer:FindFirstChildOfClass("Backpack") or character
+			end
+		end)
+	end
+
+	function controller.throw()
+		if State.detached or controller.onCooldown or controller.debounce or controller.justRespawned then
+			return false
+		end
+
+		controller.debounce = true
+
+		task.delay(BOMB_DEBOUNCE, function()
+			controller.debounce = false
+		end)
+
+		local tool = getToy()
+
+		if not tool then
+			return false
+		end
+
+		local character = localPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local camera = workspace.CurrentCamera
+
+		if not (humanoid and hrp and camera) then
+			return false
+		end
+
+		local position = hrp.Position + camera.CFrame.LookVector * BOMB_THROW_DISTANCE
+		local remote = tool:FindFirstChild("Remote")
+
+		if remote then
+			pcall(function()
+				remote:FireServer(CFrame.new(position), 50)
+			end)
+		end
+
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end)
+
+		unequip()
+		task.delay(0.1, startCooldown)
+		return true
+	end
+
+	State.maid:give(localPlayer.CharacterAdded:Connect(function()
+		resetCooldown()
+		controller.justRespawned = true
+
+		task.delay(1, function()
+			if not State.detached then
+				controller.justRespawned = false
+			end
+		end)
+	end))
+
+	return controller
+end
+
+---@param controller table
+---@param enabledKey string
+local function autoThrowIfHolding(controller, enabledKey)
+	if State.config[enabledKey] and controller.isHolding() then
+		controller.throw()
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Shared interface helpers.
+--------------------------------------------------------------------------------
+
+local function refreshAll()
+	for _, refresh in State.refreshers do
+		refresh()
+	end
+end
+
+---@return number
+local function nextOrder()
+	State.layoutOrder += 1
+	return State.layoutOrder
+end
+
+---@param className string
+---@param properties table
+---@param parent Instance?
+---@return Instance
+local function create(className, properties, parent)
+	local instance = Instance.new(className)
+
+	for property, value in properties do
+		instance[property] = value
+	end
+
+	instance.Parent = parent
+	return instance
+end
+
+---@param instance Instance
+---@param goal table
+---@param duration number?
+---@param style Enum.EasingStyle?
+---@return Tween
+local function tween(instance, goal, duration, style)
+	local info = TweenInfo.new(duration or 0.15, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local playing = tweenService:Create(instance, info, goal)
+	playing:Play()
+	return playing
+end
+
+---@param instance Instance
+---@param property string
+local function bindAccent(instance, property)
+	instance[property] = THEME.accent
+	table.insert(State.accentBound, { instance = instance, property = property })
+end
+
+---@return ColorSequence
+local function accentSequence()
+	return ColorSequence.new(THEME.accent, THEME.accent2)
+end
+
+---@param gradient UIGradient
+---@param spin boolean?
+---@return UIGradient
+local function registerGradient(gradient, spin)
+	gradient.Color = accentSequence()
+	table.insert(State.gradients, gradient)
+
+	if spin then
+		table.insert(State.spinners, gradient)
+	end
+
+	return gradient
+end
+
+---@param name string
+local function applyTheme(name)
+	for _, preset in THEME_PRESETS do
+		if preset.name == name then
+			THEME.accent = preset.accent
+			THEME.accent2 = preset.accent2
+			break
+		end
+	end
+
+	for _, entry in State.accentBound do
+		tween(entry.instance, { [entry.property] = THEME.accent }, 0.25)
+	end
+
+	for _, gradient in State.gradients do
+		gradient.Color = accentSequence()
+	end
+
+	refreshAll()
+end
+
+local function syncConfig()
+	applyTheme(State.config.theme)
+
+	if State.syncInterface then
+		State.syncInterface()
+	end
+end
+
+---@return boolean
+local function saveConfig()
+	return (pcall(function()
+		if not isfolder(CONFIG_FOLDER) then
+			makefolder(CONFIG_FOLDER)
+		end
+
+		writefile(CONFIG_PATH, httpService:JSONEncode(State.config))
+	end))
+end
+
+---@param onlyIfAuto boolean?
+---@return boolean
+local function loadConfig(onlyIfAuto)
+	local success, decoded = pcall(function()
+		if not isfile(CONFIG_PATH) then
+			return nil
+		end
+
+		return httpService:JSONDecode(readfile(CONFIG_PATH))
+	end)
+
+	if not success or typeof(decoded) ~= "table" then
+		return false
+	end
+
+	-- A saved config is used unless it was saved with Auto Load switched off.
+	if onlyIfAuto and decoded.autoLoad == false then
+		return false
+	end
+
+	for key, value in decoded do
+		if typeof(State.config[key]) == typeof(value) then
+			State.config[key] = value
+		end
+	end
+
+	sanitizeConfig()
+	syncConfig()
+	return true
+end
+
+local function resetConfig()
+	for key, value in DEFAULT_CONFIG do
+		State.config[key] = value
+	end
+
+	Predictor.reset()
+	syncConfig()
+end
+
+---@param input InputObject
+---@return boolean
+local function isPointerInput(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---@param input InputObject
+---@param bind string
+---@return boolean
+local function matchesBind(input, bind)
+	if bind == "None" then
+		return false
+	end
+
+	if bind == "Mouse2" then
+		return input.UserInputType == Enum.UserInputType.MouseButton2
+	end
+
+	local keyCode = Enum.KeyCode[bind]
+	return keyCode ~= nil and input.KeyCode == keyCode
+end
+
+local function installKeybinds()
+	State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then
+			return
+		end
+
+		local config = State.config
+
+		if matchesBind(input, config.silentKeybind) then
+			config.silentAim = not config.silentAim
+			refreshAll()
+			notify("Silent Aim", config.silentAim and "Enabled" or "Disabled", config.silentAim and "success" or "info")
+		elseif matchesBind(input, config.shootKeybind) then
+			local ok, reason = Silent.shoot()
+
+			if not ok and reason ~= "Too fast" then
+				notify("Shoot", tostring(reason), "error")
+			end
+		elseif matchesBind(input, config.gunKeybind) then
+			task.spawn(function()
+				local ok, reason = GunGrab.run()
+				notify("Get Gun", ok and "Picked up the gun" or tostring(reason), ok and "success" or "error")
+			end)
+		end
+	end))
+end
+
+local function installBombTapListener()
+	State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed or not isPointerInput(input) then
+			return
+		end
+
+		if State.bombController then
+			autoThrowIfHolding(State.bombController, "bombJumpEnabled")
+		end
+
+		if State.goldBombController then
+			autoThrowIfHolding(State.goldBombController, "goldBombJumpEnabled")
+		end
+	end))
+end
+
+---@return boolean
+local function isScrolling()
+	return os.clock() - State.lastScrollTime < 0.2
+end
+
+---@param frame GuiObject
+local function keepOnScreen(frame)
+	local camera = workspace.CurrentCamera
+
+	if not camera then
+		return
+	end
+
+	local viewport = camera.ViewportSize
+	local position, size = frame.AbsolutePosition, frame.AbsoluteSize
+	local margin = 44
+	local shiftX, shiftY = 0, 0
+
+	if position.X + size.X < margin then
+		shiftX = margin - (position.X + size.X)
+	elseif position.X > viewport.X - margin then
+		shiftX = (viewport.X - margin) - position.X
+	end
+
+	if position.Y < 0 then
+		shiftY = -position.Y
+	elseif position.Y > viewport.Y - margin then
+		shiftY = (viewport.Y - margin) - position.Y
+	end
+
+	if shiftX ~= 0 or shiftY ~= 0 then
+		frame.Position = frame.Position + UDim2.fromOffset(shiftX, shiftY)
+	end
+end
+
+---@param handle GuiObject
+---@param frame GuiObject
+---@param onClick function?
+local function makeDraggable(handle, frame, onClick)
+	local dragging, dragInput, dragStart, startPosition, moved = false, nil, nil, nil, false
+
+	State.maid:give(handle.InputBegan:Connect(function(input)
+		if not isPointerInput(input) then
+			return
+		end
+
+		dragging = true
+		moved = false
+		dragInput = input
+		dragStart = input.Position
+		startPosition = frame.Position
+	end))
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			return
+		end
+
+		if input ~= dragInput and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
+		end
+
+		local delta = input.Position - dragStart
+
+		if not moved and delta.Magnitude < DRAG_THRESHOLD then
+			return
+		end
+
+		moved = true
+		frame.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+	end))
+
+	State.maid:give(userInputService.InputEnded:Connect(function(input)
+		if not dragging then
+			return
+		end
+
+		if input ~= dragInput and not isPointerInput(input) then
+			return
+		end
+
+		dragging = false
+
+		if moved then
+			keepOnScreen(frame)
+		elseif onClick then
+			onClick()
+		end
+	end))
+end
+
+---@param parent Instance
+---@param size number
+---@return GuiObject
+local function addLogo(parent, size)
+	if State.logoAsset then
+		local image = create("ImageLabel", {
+			Size = UDim2.fromOffset(size, size),
+			BackgroundColor3 = Color3.fromRGB(8, 8, 16),
+			BorderSizePixel = 0,
+			Image = State.logoAsset,
+			ScaleType = Enum.ScaleType.Crop,
+		}, parent)
+
+		create("UICorner", { CornerRadius = UDim.new(1, 0) }, image)
+		return image
+	end
+
+	local letter = create("TextLabel", {
+		Size = UDim2.fromOffset(size, size),
+		Font = Enum.Font.GothamBlack,
+		TextSize = math.floor(size * 0.55),
+		TextColor3 = Color3.new(1, 1, 1),
+		Text = "A",
+		BorderSizePixel = 0,
+	}, parent)
+
+	bindAccent(letter, "BackgroundColor3")
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, letter)
+	return letter
+end
+
+---@param gui GuiObject
+---@param amount number
+---@param speed number
+---@return UIScale
+local function addPulse(gui, amount, speed)
+	local scale = create("UIScale", { Scale = 1 }, gui)
+	table.insert(State.pulses, { scale = scale, amount = amount, speed = speed })
+	return scale
+end
+
+---@param row GuiObject
+---@param text string
+---@return TextLabel
+local function addRowLabel(row, text)
+	return create("TextLabel", {
+		Size = UDim2.new(1, -110, 1, 0),
+		Position = UDim2.fromOffset(6, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = TEXT_SIZE,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = text,
+	}, row)
+end
+
+---@param gui GuiObject
+---@param input InputObject
+local function playRipple(gui, input)
+	if State.detached then
+		return
+	end
+
+	local scale = State.config.uiScale / 100
+	local size = gui.AbsoluteSize / scale
+	local x = math.clamp((input.Position.X - gui.AbsolutePosition.X) / scale, 0, size.X)
+	local diameter = math.max(size.X, size.Y) * 1.6
+
+	local ripple = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, x, 0.5, 0),
+		Size = UDim2.fromOffset(0, 0),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.82,
+		BorderSizePixel = 0,
+		ZIndex = 5,
+	}, gui)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, ripple)
+	tween(ripple, { Size = UDim2.fromOffset(diameter, diameter), BackgroundTransparency = 1 }, 0.5)
+
+	task.delay(0.55, function()
+		ripple:Destroy()
+	end)
+end
+
+---@param gui GuiObject
+local function addRipple(gui)
+	gui.ClipsDescendants = true
+
+	State.maid:give(gui.InputBegan:Connect(function(input)
+		if isPointerInput(input) then
+			playRipple(gui, input)
+		end
+	end))
+end
+
+---@param enabled boolean
+local function setScrollingEnabled(enabled)
+	for _, page in State.pageFrames do
+		page.ScrollingEnabled = enabled
+	end
+end
+
+---@param page ScrollingFrame
+---@param title string
+---@param startCollapsed boolean?
+---@return Frame
+local function addSection(page, title, startCollapsed)
+	local card = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, page)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 9) }, card)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, card)
+	create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
+
+	local header = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT + 2),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = 1,
+	}, card)
+
+	addRipple(header)
+
+	local dot = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 12, 0.5, 0),
+		Size = UDim2.fromOffset(6, 6),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, header)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, dot)
+	registerGradient(create("UIGradient", { Rotation = 45 }, dot))
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(26, 0),
+		Size = UDim2.new(1, -56, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = string.upper(title),
+	}, header)
+
+	local arrow = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = THEME.subText,
+		Text = ">",
+		Rotation = 90,
+	}, header)
+
+	local body = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		LayoutOrder = 2,
+	}, card)
+
+	local layout = create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 4) }, body)
+
+	local section = {
+		card = card,
+		title = string.lower(title),
+		pageName = State.pageNames[page],
+		entries = {},
+		collapsed = false,
+	}
+
+	local function expandedHeight()
+		return layout.AbsoluteContentSize.Y + 10
+	end
+
+	function section.setCollapsed(collapsed)
+		section.collapsed = collapsed
+		tween(arrow, { Rotation = collapsed and 0 or 90 }, 0.25, Enum.EasingStyle.Back)
+		tween(body, { Size = UDim2.new(1, 0, 0, collapsed and 0 or expandedHeight()) }, 0.28, Enum.EasingStyle.Quint)
+	end
+
+	State.maid:give(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		if not section.collapsed then
+			body.Size = UDim2.new(1, 0, 0, expandedHeight())
+		end
+	end))
+
+	State.maid:give(header.MouseButton1Click:Connect(function()
+		if isScrolling() then
+			return
+		end
+
+		section.setCollapsed(not section.collapsed)
+	end))
+
+	State.sections[body] = section
+
+	if startCollapsed then
+		section.collapsed = true
+		arrow.Rotation = 0
+		body.Size = UDim2.new(1, 0, 0, 0)
+	end
+
+	return body
+end
+
+---@param body Frame
+---@param row GuiObject
+---@param text string
+local function registerEntry(body, row, text)
+	local section = State.sections[body]
+	local entry = { row = row, section = section, text = string.lower(text) }
+	table.insert(section.entries, entry)
+	table.insert(State.searchEntries, entry)
+end
+
+---@param row GuiObject
+local function addHover(row)
+	State.maid:give(row.MouseEnter:Connect(function()
+		if not IS_TOUCH then
+			tween(row, { BackgroundTransparency = 0.7 })
+		end
+	end))
+
+	State.maid:give(row.MouseLeave:Connect(function()
+		tween(row, { BackgroundTransparency = 1 })
+	end))
+
+	State.maid:give(row.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			tween(row, { BackgroundTransparency = 0.7 }, 0.08)
+		end
+	end))
+
+	State.maid:give(row.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			tween(row, { BackgroundTransparency = 1 }, 0.25)
+		end
+	end))
+end
+
+---@param body Frame
+---@param label string
+---@param key string
+---@param onChange function?
+local function addToggle(body, label, key, onChange)
+	local row = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+		BackgroundColor3 = THEME.element,
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = nextOrder(),
+	}, body)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, row)
+	addRowLabel(row, label)
+	addHover(row)
+	addRipple(row)
+
+	local track = create("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.fromOffset(44, 24),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+	}, row)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+	local trackStroke = create("UIStroke", { Thickness = 2, Transparency = 1 }, track)
+	bindAccent(trackStroke, "Color")
+
+	local knob = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(18, 18),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, track)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local function refresh()
+		local enabled = State.config[key]
+		tween(track, { BackgroundColor3 = enabled and THEME.accent or THEME.element }, 0.2)
+		tween(trackStroke, { Transparency = enabled and 0.55 or 1 }, 0.25)
+		tween(knob, { Position = enabled and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) }, 0.3, Enum.EasingStyle.Back)
+	end
+
+	State.maid:give(row.MouseButton1Down:Connect(function()
+		tween(knob, { Size = UDim2.fromOffset(22, 18) }, 0.1)
+	end))
+
+	State.maid:give(row.MouseButton1Up:Connect(function()
+		tween(knob, { Size = UDim2.fromOffset(18, 18) }, 0.1)
+	end))
+
+	State.maid:give(row.MouseButton1Click:Connect(function()
+		if isScrolling() then
+			return
+		end
+
+		State.config[key] = not State.config[key]
+		refresh()
+
+		if onChange then
+			onChange(State.config[key])
+		end
+	end))
+
+	table.insert(State.refreshers, refresh)
+	registerEntry(body, row, label)
+	refresh()
+end
+
+---@param body Frame
+---@param label string
+---@param key string
+---@param minimum number
+---@param maximum number
+---@param step number
+---@param options table?
+local function addSlider(body, label, key, minimum, maximum, step, options)
+	options = options or {}
+
+	local holder = create("Frame", {
+		Size = UDim2.new(1, 0, 0, IS_TOUCH and 56 or 46),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, body)
+
+	addRowLabel(holder, label).Size = UDim2.new(1, -80, 0, 20)
+
+	local valueLabel = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -6, 0, 0),
+		Size = UDim2.fromOffset(70, 20),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, holder)
+
+	local hitbox = create("Frame", {
+		Position = UDim2.fromOffset(6, 22),
+		Size = UDim2.new(1, -12, 0, IS_TOUCH and 30 or 22),
+		BackgroundTransparency = 1,
+	}, holder)
+
+	local bar = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 8),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+	}, hitbox)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+
+	local fill = create("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, bar)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+	registerGradient(create("UIGradient", {}, fill))
+
+	local knobSize = IS_TOUCH and 24 or 18
+
+	local knob = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0, 0.5),
+		Size = UDim2.fromOffset(knobSize, knobSize),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, bar)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local knobStroke = create("UIStroke", { Thickness = 2 }, knob)
+	bindAccent(knobStroke, "Color")
+
+	local function refresh()
+		local value = State.config[key]
+		local alpha = math.clamp((value - minimum) / (maximum - minimum), 0, 1)
+		valueLabel.Text = tostring(value) .. (options.suffix or "")
+		fill.Size = UDim2.fromScale(alpha, 1)
+		knob.Position = UDim2.fromScale(alpha, 0.5)
+	end
+
+	local function updateFromInput(input)
+		local alpha = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		local value = minimum + (maximum - minimum) * alpha
+		State.config[key] = math.clamp(math.floor(value / step + 0.5) * step, minimum, maximum)
+		refresh()
+
+		if options.onChange then
+			options.onChange(State.config[key])
+		end
+	end
+
+	local sliding, slideInput = false, nil
+
+	State.maid:give(hitbox.InputBegan:Connect(function(input)
+		if not isPointerInput(input) then
+			return
+		end
+
+		sliding = true
+		slideInput = input
+		State.sliderActive = true
+		setScrollingEnabled(false)
+		tween(knob, { Size = UDim2.fromOffset(knobSize + 6, knobSize + 6) }, 0.12, Enum.EasingStyle.Back)
+		tween(knobStroke, { Thickness = 4 }, 0.12)
+		updateFromInput(input)
+	end))
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		if not sliding then
+			return
+		end
+
+		if input ~= slideInput and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
+		end
+
+		updateFromInput(input)
+	end))
+
+	State.maid:give(userInputService.InputEnded:Connect(function(input)
+		if not sliding then
+			return
+		end
+
+		if input ~= slideInput and not isPointerInput(input) then
+			return
+		end
+
+		sliding = false
+		State.sliderActive = false
+		setScrollingEnabled(true)
+		tween(knob, { Size = UDim2.fromOffset(knobSize, knobSize) }, 0.15)
+		tween(knobStroke, { Thickness = 2 }, 0.15)
+	end))
+
+	table.insert(State.refreshers, refresh)
+	registerEntry(body, holder, label)
+	refresh()
+end
+
+---@param body Frame
+---@param label string
+---@param key string
+---@param choices table
+---@param onChange function?
+local function addCycle(body, label, key, choices, onChange)
+	local row = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+		BackgroundColor3 = THEME.element,
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = nextOrder(),
+	}, body)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, row)
+	addRowLabel(row, label)
+	addHover(row)
+	addRipple(row)
+
+	local chipSize = UDim2.fromOffset(96, ROW_HEIGHT - 8)
+
+	local chip = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -6, 0.5, 0),
+		Size = chipSize,
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+	}, row)
+
+	bindAccent(chip, "TextColor3")
+	create("UICorner", { CornerRadius = UDim.new(0, 8) }, chip)
+
+	local function refresh()
+		chip.Text = State.config[key]
+	end
+
+	State.maid:give(row.MouseButton1Click:Connect(function()
+		if isScrolling() then
+			return
+		end
+
+		local index = table.find(choices, State.config[key]) or 0
+		State.config[key] = choices[index % #choices + 1]
+		refresh()
+		chip.Size = UDim2.fromOffset(108, ROW_HEIGHT - 8)
+		tween(chip, { Size = chipSize }, 0.25, Enum.EasingStyle.Back)
+
+		if onChange then
+			onChange(State.config[key])
+		end
+	end))
+
+	table.insert(State.refreshers, refresh)
+	registerEntry(body, row, label)
+	refresh()
+end
+
+---@param body Frame
+---@param text string
+---@param callback function
+---@param hoverColor Color3?
+local function addButton(body, text, callback, hoverColor)
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamMedium,
+		TextSize = TEXT_SIZE,
+		TextColor3 = THEME.text,
+		Text = text,
+		LayoutOrder = nextOrder(),
+	}, body)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, button)
+	addRipple(button)
+
+	local function highlight(active)
+		tween(button, { BackgroundColor3 = active and (hoverColor or THEME.accent) or THEME.element }, 0.15)
+	end
+
+	State.maid:give(button.MouseEnter:Connect(function()
+		if not IS_TOUCH then
+			highlight(true)
+		end
+	end))
+
+	State.maid:give(button.MouseLeave:Connect(function()
+		highlight(false)
+	end))
+
+	State.maid:give(button.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			highlight(true)
+		end
+	end))
+
+	State.maid:give(button.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			highlight(false)
+		end
+	end))
+
+	State.maid:give(button.MouseButton1Click:Connect(function()
+		if isScrolling() then
+			return
+		end
+
+		callback()
+	end))
+
+	registerEntry(body, button, text)
+end
+
+---@param body Frame
+---@param text string
+local function addInfo(body, text)
+	create("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = text,
+		LayoutOrder = nextOrder(),
+	}, body)
+end
+
+---A row whose value is refreshed several times a second.
+---@param body Frame
+---@param label string
+---@param getter function
+local function addLive(body, label, getter)
+	local row = create("Frame", {
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, body)
+
+	addRowLabel(row, label).Size = UDim2.new(1, -190, 1, 0)
+
+	local value = create("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.new(0, 180, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Text = "-",
+	}, row)
+
+	table.insert(State.liveRows, { label = value, getter = getter })
+	registerEntry(body, row, label)
+end
+
+---@param wrapper Frame
+local function dismissToast(wrapper)
+	if State.detached then
+		return
+	end
+
+	local index = table.find(State.toasts, wrapper)
+
+	if not index then
+		return
+	end
+
+	table.remove(State.toasts, index)
+
+	local toast = wrapper:FindFirstChild("Toast")
+
+	if toast then
+		tween(toast, { Position = UDim2.fromOffset(TOAST_WIDTH + 40, 0) }, 0.22, Enum.EasingStyle.Back)
+	end
+
+	task.delay(0.25, function()
+		if not State.detached then
+			wrapper:Destroy()
+		end
+	end)
+end
+
+---@param title string
+---@param message string
+---@param kind string?
+local function showToast(title, message, kind)
+	if State.detached or not State.notifyHolder then
+		return
+	end
+
+	local color = THEME.accent
+	local iconText = "i"
+
+	if kind == "success" then
+		color = THEME.success
+		iconText = "OK"
+	elseif kind == "error" then
+		color = THEME.danger
+		iconText = "!"
+	end
+
+	if #State.toasts >= TOAST_MAX then
+		dismissToast(State.toasts[1])
+	end
+
+	local wrapper = create("Frame", {
+		Size = UDim2.fromOffset(TOAST_WIDTH, 58),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, State.notifyHolder)
+
+	local toast = create("TextButton", {
+		Name = "Toast",
+		Position = UDim2.fromOffset(TOAST_WIDTH + 40, 0),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		ClipsDescendants = true,
+		Text = "",
+	}, wrapper)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, toast)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, toast)
+
+	local icon = create("TextLabel", {
+		Position = UDim2.fromOffset(10, 16),
+		Size = UDim2.fromOffset(26, 26),
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 11,
+		TextColor3 = Color3.fromRGB(10, 12, 20),
+		Text = iconText,
+	}, toast)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, icon)
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(46, 9),
+		Size = UDim2.new(1, -54, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = title,
+	}, toast)
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(46, 28),
+		Size = UDim2.new(1, -54, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Text = message,
+	}, toast)
+
+	local progress = create("Frame", {
+		Position = UDim2.new(0, 0, 1, -3),
+		Size = UDim2.new(1, 0, 0, 3),
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+	}, toast)
+
+	table.insert(State.toasts, wrapper)
+	tween(toast, { Position = UDim2.fromOffset(0, 0) }, 0.4, Enum.EasingStyle.Back)
+	tween(icon, { Rotation = 360 }, 0.5, Enum.EasingStyle.Quint)
+	tweenService:Create(progress, TweenInfo.new(3.5, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 3) }):Play()
+
+	toast.MouseButton1Click:Connect(function()
+		dismissToast(wrapper)
+	end)
+
+	task.delay(3.5, function()
+		dismissToast(wrapper)
+	end)
+end
+
+---@param screenGui ScreenGui
+local function createWatermark(screenGui)
+	local boxColor = Color3.fromRGB(18, 18, 20)
+
+	local frame = create("TextButton", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 220, 0, 16),
+		Size = UDim2.fromOffset(0, 52),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = boxColor,
+		BackgroundTransparency = 0.1,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "",
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 14) }, frame)
+
+	local tab = create("TextLabel", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.fromOffset(0, 22),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = boxColor,
+		BackgroundTransparency = 0.1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = Color3.new(1, 1, 1),
+		Text = "ASTRA HUB",
+	}, frame)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, tab)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, tab)
+
+	local label = create("TextLabel", {
+		Position = UDim2.fromOffset(14, 4),
+		Size = UDim2.fromOffset(0, 26),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 20,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = "Innocent",
+	}, frame)
+
+	local subLabel = create("TextLabel", {
+		Position = UDim2.fromOffset(14, 30),
+		Size = UDim2.fromOffset(0, 16),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = Color3.fromRGB(190, 190, 196),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = "0 fps  |  0 ms",
+	}, frame)
+
+	create("UIPadding", { PaddingRight = UDim.new(0, 14) }, frame)
+
+	State.watermark = { frame = frame, label = label, subLabel = subLabel, tab = tab }
+
+	State.maid:give(frame.MouseButton1Click:Connect(function()
+		if isScrolling() then
+			return
+		end
+
+		State.config.silentAim = not State.config.silentAim
+		refreshAll()
+	end))
+
+	local function refreshBannerTint()
+		local enabled = State.config.silentAim
+		tween(frame, { BackgroundColor3 = enabled and Color3.fromRGB(20, 40, 26) or boxColor }, 0.2)
+	end
+
+	table.insert(State.refreshers, refreshBannerTint)
+	refreshBannerTint()
+	tween(frame, { Position = UDim2.new(1, -16, 0, 16) }, 0.6, Enum.EasingStyle.Back)
+end
+
+---@param screenGui ScreenGui
+---@param onDone function
+local function playIntro(screenGui, onDone)
+	local overlay = create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(4, 5, 10),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Active = true,
+		ZIndex = 50,
+	}, screenGui)
+
+	State.introOverlay = overlay
+
+	for _ = 1, 18 do
+		local size = math.random(2, 4)
+
+		local star = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(math.random(), math.random()),
+			Size = UDim2.fromOffset(size, size),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ZIndex = 50,
+		}, overlay)
+
+		create("UICorner", { CornerRadius = UDim.new(1, 0) }, star)
+
+		local info = TweenInfo.new(0.6 + math.random() * 0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, math.random() * 0.8)
+		tweenService:Create(star, info, { BackgroundTransparency = 0.2 }):Play()
+	end
+
+	local group = create("CanvasGroup", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(300, 240),
+		BackgroundTransparency = 1,
+		GroupTransparency = 1,
+		ZIndex = 51,
+	}, overlay)
+
+	local groupScale = create("UIScale", { Scale = 0.8 }, group)
+	local logo = addLogo(group, 120)
+	logo.AnchorPoint = Vector2.new(0.5, 0.5)
+	logo.Position = UDim2.new(0.5, 0, 0, 60)
+	addPulse(logo, 0.035, 3)
+
+	local ring = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2.5 }, logo)
+	registerGradient(create("UIGradient", {}, ring), true)
+
+	local title = create("TextLabel", {
+		Position = UDim2.fromOffset(0, 132),
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 26,
+		TextColor3 = Color3.new(1, 1, 1),
+		Text = "ASTRA HUB",
+	}, group)
+
+	registerGradient(create("UIGradient", {}, title))
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(0, 166),
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		Text = "Murder Mystery 2  |  " .. VERSION,
+	}, group)
+
+	local barBack = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 200),
+		Size = UDim2.fromOffset(180, 4),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+	}, group)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, barBack)
+
+	local barFill = create("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, barBack)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, barFill)
+	registerGradient(create("UIGradient", {}, barFill))
+
+	tween(overlay, { BackgroundTransparency = 0.2 }, 0.3)
+	tween(group, { GroupTransparency = 0 }, 0.4)
+	tween(groupScale, { Scale = 1 }, 0.6, Enum.EasingStyle.Back)
+	tweenService:Create(barFill, TweenInfo.new(INTRO_DURATION - 0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { Size = UDim2.fromScale(1, 1) }):Play()
+
+	task.delay(INTRO_DURATION, function()
+		if State.detached then
+			return
+		end
+
+		tween(group, { GroupTransparency = 1 }, 0.3)
+		tween(groupScale, { Scale = 1.15 }, 0.35)
+		tween(overlay, { BackgroundTransparency = 1 }, 0.35)
+
+		task.delay(0.36, function()
+			if State.detached then
+				return
+			end
+
+			overlay:Destroy()
+			State.introOverlay = nil
+			onDone()
+		end)
+	end)
+end
+
+---@return Instance
+local function getGuiParent()
+	local success, container = pcall(function()
+		return gethui and gethui()
+	end)
+
+	if success and container then
+		return container
+	end
+
+	return coreGui
+end
+
+---Wheel and drag scrolling that keeps working when the engine's own scrolling does not.
+---@param pageArea Frame
+---@param pages table
+local function installScrollFallback(pageArea, pages)
+	local function isInside(position)
+		local corner, size = pageArea.AbsolutePosition, pageArea.AbsoluteSize
+		return position.X >= corner.X and position.X <= corner.X + size.X and position.Y >= corner.Y and position.Y <= corner.Y + size.Y
+	end
+
+	local function getMaxScroll(page)
+		return math.max(0, page.AbsoluteCanvasSize.Y - page.AbsoluteWindowSize.Y)
+	end
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseWheel or not State.menuVisible then
+			return
+		end
+
+		local page = pages[State.currentTab]
+
+		if not page or not isInside(userInputService:GetMouseLocation()) then
+			return
+		end
+
+		local before = page.CanvasPosition.Y
+		local direction = input.Position.Z
+
+		task.spawn(function()
+			runService.RenderStepped:Wait()
+
+			if State.detached or page.CanvasPosition.Y ~= before then
+				return
+			end
+
+			page.CanvasPosition = Vector2.new(0, math.clamp(before - direction * WHEEL_STEP, 0, getMaxScroll(page)))
+			State.lastScrollTime = os.clock()
+		end)
+	end))
+
+	local tracking = nil
+
+	State.maid:give(userInputService.InputBegan:Connect(function(input)
+		if not State.menuVisible or not isPointerInput(input) then
+			return
+		end
+
+		local inside = isInside(userInputService:GetMouseLocation())
+		local page = pages[State.currentTab]
+
+		if not inside or not page then
+			return
+		end
+
+		tracking = {
+			input = input,
+			page = page,
+			startY = input.Position.Y,
+			canvas = page.CanvasPosition.Y,
+			checkAt = nil,
+			taken = false,
+		}
+	end))
+
+	State.maid:give(userInputService.InputChanged:Connect(function(input)
+		local track = tracking
+
+		if not track or State.sliderActive then
+			return
+		end
+
+		local sameTouch = input == track.input
+		local mouseMove = track.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement
+
+		if not (sameTouch or mouseMove) then
+			return
+		end
+
+		local delta = input.Position.Y - track.startY
+
+		if math.abs(delta) < SCROLL_THRESHOLD then
+			return
+		end
+
+		if not track.checkAt then
+			track.checkAt = os.clock() + 0.08
+			return
+		end
+
+		if not track.taken then
+			if os.clock() < track.checkAt then
+				return
+			end
+
+			if track.page.CanvasPosition.Y ~= track.canvas then
+				tracking = nil
+				return
+			end
+
+			track.taken = true
+			State.scrollTaken = true
+			track.page.ScrollingEnabled = false
+		end
+
+		State.lastScrollTime = os.clock()
+		track.page.CanvasPosition = Vector2.new(0, math.clamp(track.canvas - delta, 0, getMaxScroll(track.page)))
+	end))
+
+	State.maid:give(userInputService.InputEnded:Connect(function(input)
+		local track = tracking
+
+		if not track then
+			return
+		end
+
+		if input ~= track.input and not isPointerInput(input) then
+			return
+		end
+
+		if track.taken then
+			State.scrollTaken = false
+			track.page.ScrollingEnabled = true
+		end
+
+		tracking = nil
+	end))
+end
+
+--------------------------------------------------------------------------------
+-- Per-frame work.
+--------------------------------------------------------------------------------
+
+---@return number
+local function getPing()
+	return math.floor(Ping.rttSeconds * 1000 + 0.5)
+end
+
+---@param deltaTime number
+local function updateHud(deltaTime)
+	State.fps = State.fps + (1 / math.max(deltaTime, 0.001) - State.fps) * 0.1
+
+	if os.clock() - State.lastHud < 0.25 then
+		return
+	end
+
+	State.lastHud = os.clock()
+
+	local role = State.myRole
+
+	if State.roleChip then
+		State.roleChip.Text = role
+		State.roleChip.TextColor3 = ROLE_COLORS[role] or ROLE_COLORS.Innocent
+	end
+
+	if State.profileRole then
+		State.profileRole.Text = role
+		State.profileRole.TextColor3 = ROLE_COLORS[role] or ROLE_COLORS.Innocent
+	end
+
+	local gunSub = State.dockSubs.gun
+
+	if gunSub then
+		local dropped = next(GunEsp.markers) ~= nil
+		gunSub.Text = dropped and "DROP!" or "GRAB"
+		gunSub.TextColor3 = dropped and GUN_COLOR or THEME.subText
+	end
+
+	if State.menuVisible then
+		for _, row in State.liveRows do
+			local success, text = pcall(row.getter)
+			row.label.Text = success and tostring(text) or "-"
+		end
+	end
+
+	local watermark = State.watermark
+
+	if not watermark then
+		return
+	end
+
+	watermark.frame.Visible = State.config.watermark
+
+	if not State.config.watermark then
+		return
+	end
+
+	local headline = role
+
+	if State.target then
+		headline = "Aiming " .. State.target.player.Name
+	elseif State.config.silentAim and State.holdingGun then
+		headline = "Silent Aim Ready"
+	elseif State.holdingGun then
+		headline = "Gun Ready"
+	end
+
+	watermark.label.Text = headline
+	watermark.label.TextColor3 = State.target and ROLE_COLORS.Murderer or Color3.new(1, 1, 1)
+	watermark.subLabel.Text = string.format("%d fps  |  %d ms  |  lead %d ms", math.floor(State.fps + 0.5), getPing(), math.floor(Predictor.lastLead * 1000 + 0.5))
+end
+
+---@param deltaTime number
+local function onRender(deltaTime)
+	if State.detached then
+		return
+	end
+
+	local config = State.config
+	local camera = workspace.CurrentCamera
+
+	if not camera then
+		return
+	end
+
+	local now = os.clock()
+
+	Roles.refresh()
+	State.myRole = (Roles.of(localPlayer))
+	State.holdingGun = isHoldingGun()
+	State.hasGun = State.holdingGun or hasGunAnywhere()
+
+	if now - State.lastPing > 0.2 then
+		State.lastPing = now
+		Ping.update()
+	end
+
+	if now >= State.nextRoll then
+		State.nextRoll = now + 0.35
+		State.hitRoll = math.random(1, 100) <= config.hitChance
+		State.headRoll = math.random() < 0.6
+	end
+
+	for _, player in playersService:GetPlayers() do
+		if player ~= localPlayer then
+			local character = player.Character
+			local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+			if hrp then
+				Tracker.record(player, hrp)
+				Profiles.observe(player, character:FindFirstChildOfClass("Humanoid"), now)
+			else
+				Tracker.histories[player] = nil
+			end
+		end
+	end
+
+	local wantTarget = State.hasGun and (config.silentAim or config.showShootButton or config.predictionMarker)
+
+	if now - State.lastScan >= SCAN_INTERVAL then
+		State.lastScan = now
+
+		if wantTarget then
+			local picked = pickTarget(camera)
+			State.targetPlayer = picked
+			State.targetPart = picked and getAimPart(picked) or nil
+		else
+			State.targetPlayer, State.targetPart = nil, nil
+		end
+	end
+
+	local target = nil
+	local part = State.targetPart
+
+	if State.targetPlayer and part and part.Parent then
+		local position, lead, model = Predictor.predict(State.targetPlayer, part)
+		target = { player = State.targetPlayer, part = part, aimPosition = position, lead = lead }
+		Predictor.queue(State.targetPlayer, model, lead)
+	end
+
+	State.target = target
+	Predictor.resolve()
+	Silent.resolveShots()
+
+	local screenCenter = camera.ViewportSize / 2
+	local fovRing = State.fovRing
+
+	if fovRing then
+		fovRing.Visible = config.silentAim and config.silentUseFov and config.fovVisible and State.holdingGun
+		fovRing.Size = UDim2.fromOffset(config.silentFov * 2, config.silentFov * 2)
+		fovRing.Position = UDim2.fromOffset(screenCenter.X, screenCenter.Y)
+		State.fovStroke.Color = target and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 255, 255)
+	end
+
+	-- ScreenGui is created with IgnoreGuiInset, so viewport coordinates line up with it.
+	local targetScreen = target and camera:WorldToViewportPoint(target.part.Position)
+	local predictionScreen = target and camera:WorldToViewportPoint(target.aimPosition)
+
+	if State.targetLine and State.targetDot then
+		local showLine = config.targetLine and targetScreen ~= nil
+		State.targetLine.Visible = showLine
+		State.targetDot.Visible = showLine
+
+		if showLine then
+			local delta = Vector2.new(targetScreen.X, targetScreen.Y) - screenCenter
+			local midpoint = screenCenter + delta / 2
+			State.targetLine.Size = UDim2.fromOffset(delta.Magnitude, 2)
+			State.targetLine.Position = UDim2.fromOffset(midpoint.X, midpoint.Y)
+			State.targetLine.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+			State.targetDot.Position = UDim2.fromOffset(targetScreen.X, targetScreen.Y)
+		end
+	end
+
+	if State.predictionDot then
+		local showMarker = config.predictionMarker and predictionScreen ~= nil and predictionScreen.Z > 0
+		State.predictionDot.Visible = showMarker
+
+		if showMarker then
+			State.predictionDot.Position = UDim2.fromOffset(predictionScreen.X, predictionScreen.Y)
+		end
+	end
+
+	for _, esp in State.esp do
+		esp:update()
+	end
+
+	GunEsp.update(camera)
+
+	for _, gradient in State.spinners do
+		gradient.Rotation = (gradient.Rotation + deltaTime * 60) % 360
+	end
+
+	for _, pulse in State.pulses do
+		pulse.scale.Scale = 1 + math.sin(now * pulse.speed) * pulse.amount
+	end
+
+	local scrollingEnabled = not (State.sliderActive or State.scrollTaken)
+
+	for _, page in State.pageFrames do
+		if page.ScrollingEnabled ~= scrollingEnabled then
+			page.ScrollingEnabled = scrollingEnabled
+		end
+	end
+
+	updateHud(deltaTime)
+end
+
+--------------------------------------------------------------------------------
+-- Menu.
+--------------------------------------------------------------------------------
+
+local function createMenu()
+	local screenGui = State.maid:give(create("ScreenGui", {
+		Name = "AstraHubMM2",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 100,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}))
+
+	State.guiParent = getGuiParent()
+
+	if not pcall(function()
+		screenGui.Parent = State.guiParent
+	end) or not screenGui.Parent then
+		State.guiParent = localPlayer:WaitForChild("PlayerGui")
+		screenGui.Parent = State.guiParent
+	end
+
+	State.gui = screenGui
+
+	State.fovRing = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(800, 800),
+		Visible = false,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.fovRing)
+	State.fovStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, State.fovRing)
+
+	State.targetLine = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = Color3.fromRGB(0, 255, 100),
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(0, 2),
+		Visible = false,
+	}, screenGui)
+
+	State.targetDot = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = Color3.fromRGB(0, 255, 100),
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(8, 8),
+		Visible = false,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.targetDot)
+
+	-- Where the shot will actually go, so the lead can be seen and tuned.
+	State.predictionDot = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(16, 16),
+		Visible = false,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, State.predictionDot)
+	create("UIStroke", { Color = Color3.fromRGB(255, 210, 60), Thickness = 2 }, State.predictionDot)
+
+	State.notifyHolder = create("Frame", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -16, 1, -16),
+		Size = UDim2.new(0, TOAST_WIDTH, 1, -32),
+		BackgroundTransparency = 1,
+	}, screenGui)
+
+	create("UIListLayout", {
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Bottom,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+	}, State.notifyHolder)
+
+	State.notifyImpl = showToast
+
+	local window = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(620, 440),
+		BackgroundTransparency = 1,
+		Visible = false,
+	}, screenGui)
+
+	local scaler = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(620, 440),
+		BackgroundTransparency = 1,
+	}, window)
+
+	local windowScale = create("UIScale", { Scale = State.config.uiScale / 100 }, scaler)
+
+	local mainFrame = create("CanvasGroup", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.background,
+		BorderSizePixel = 0,
+		GroupTransparency = 1,
+	}, scaler)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 9) }, mainFrame)
+
+	local windowStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, mainFrame)
+	registerGradient(create("UIGradient", {}, windowStroke), true)
+
+	local popScale = create("UIScale", { Scale = 0.92 }, mainFrame)
+
+	local accentLine = create("Frame", {
+		Position = UDim2.fromOffset(16, 0),
+		Size = UDim2.new(1, -32, 0, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	registerGradient(create("UIGradient", {}, accentLine))
+
+	local HEADER_HEIGHT = 46
+
+	local titleBar = create("Frame", {
+		Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+		BackgroundTransparency = 1,
+	}, mainFrame)
+
+	local headerLogo = addLogo(titleBar, 34)
+	headerLogo.Position = UDim2.fromOffset(12, 6)
+
+	local titleHolder = create("Frame", {
+		Position = UDim2.fromOffset(56, 0),
+		Size = UDim2.new(0, 220, 1, 0),
+		BackgroundTransparency = 1,
+	}, titleBar)
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, titleHolder)
+
+	local titleLabel = create("TextLabel", {
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 16,
+		TextColor3 = Color3.new(1, 1, 1),
+		Text = "ASTRA HUB",
+		LayoutOrder = 1,
+	}, titleHolder)
+
+	registerGradient(create("UIGradient", {}, titleLabel))
+
+	local subtitleChip = create("TextLabel", {
+		Size = UDim2.fromOffset(0, 18),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = THEME.subText,
+		Text = "OVERDRIVE",
+		LayoutOrder = 2,
+	}, titleHolder)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, subtitleChip)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, subtitleChip)
+
+	-- Role, ping and frame rate at a glance, right-aligned beside the close button.
+	local headerPills = create("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -50, 0.5, 0),
+		Size = UDim2.fromOffset(0, 22),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+	}, titleBar)
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, headerPills)
+
+	---@param order number
+	---@param color Color3
+	---@param text string
+	---@return TextLabel
+	local function addPill(order, color, text)
+		local chip = create("TextLabel", {
+			Size = UDim2.fromOffset(0, 22),
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundColor3 = THEME.element,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold,
+			TextSize = 11,
+			TextColor3 = color,
+			Text = text,
+			LayoutOrder = order,
+		}, headerPills)
+
+		create("UICorner", { CornerRadius = UDim.new(1, 0) }, chip)
+		create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, chip)
+		return chip
+	end
+
+	local pingPill = addPill(1, THEME.subText, "0 ms")
+	local fpsPill = addPill(2, THEME.subText, "60 fps")
+	State.roleChip = addPill(3, ROLE_COLORS.Innocent, "Innocent")
+
+	table.insert(State.liveRows, {
+		label = pingPill,
+		getter = function()
+			return string.format("%d ms", getPing())
+		end,
+	})
+
+	table.insert(State.liveRows, {
+		label = fpsPill,
+		getter = function()
+			return string.format("%d fps", math.floor(State.fps + 0.5))
+		end,
+	})
+
+	local closeButton = create("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -12, 0.5, 0),
+		Size = UDim2.fromOffset(IS_TOUCH and 32 or 26, IS_TOUCH and 32 or 26),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		Text = "X",
+	}, titleBar)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, closeButton)
+	addRipple(closeButton)
+
+	State.maid:give(closeButton.MouseEnter:Connect(function()
+		tween(closeButton, { BackgroundColor3 = THEME.danger })
+	end))
+
+	State.maid:give(closeButton.MouseLeave:Connect(function()
+		tween(closeButton, { BackgroundColor3 = THEME.element })
+	end))
+
+	create("Frame", {
+		Position = UDim2.fromOffset(0, HEADER_HEIGHT),
+		Size = UDim2.new(1, 0, 0, 1),
+		BackgroundColor3 = THEME.stroke,
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	local divider = create("Frame", {
+		Position = UDim2.fromOffset(132, HEADER_HEIGHT + 1),
+		Size = UDim2.new(0, 1, 1, -(HEADER_HEIGHT + 1)),
+		BackgroundColor3 = THEME.stroke,
+		BorderSizePixel = 0,
+	}, mainFrame)
+
+	local TAB_HEIGHT = IS_TOUCH and 40 or 34
+	local TAB_GAP = 4
+	local TAB_PAD = 10
+
+	local sidebar = create("Frame", {
+		Position = UDim2.fromOffset(0, HEADER_HEIGHT + 1),
+		Size = UDim2.new(0, 132, 1, -(HEADER_HEIGHT + 1)),
+		BackgroundTransparency = 1,
+	}, mainFrame)
+
+	local pill = create("Frame", {
+		Position = UDim2.fromOffset(8, TAB_PAD),
+		Size = UDim2.new(1, -16, 0, TAB_HEIGHT),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		ZIndex = 1,
+	}, sidebar)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, pill)
+
+	local pillBar = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(3, 18),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, pill)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, pillBar)
+	registerGradient(create("UIGradient", { Rotation = 90 }, pillBar))
+
+	local tabList = create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ZIndex = 2,
+	}, sidebar)
+
+	create("UIListLayout", { Padding = UDim.new(0, TAB_GAP), SortOrder = Enum.SortOrder.LayoutOrder }, tabList)
+
+	create("UIPadding", {
+		PaddingTop = UDim.new(0, TAB_PAD),
+		PaddingLeft = UDim.new(0, 8),
+		PaddingRight = UDim.new(0, 8),
+	}, tabList)
+
+	local profile = create("Frame", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 8, 1, -8),
+		Size = UDim2.new(1, -16, 0, 46),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		ZIndex = 2,
+	}, sidebar)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, profile)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, profile)
+
+	local avatar = create("ImageLabel", {
+		Position = UDim2.fromOffset(8, 8),
+		Size = UDim2.fromOffset(30, 30),
+		BackgroundColor3 = THEME.element,
+		BorderSizePixel = 0,
+		Image = "rbxthumb://type=AvatarHeadShot&id=" .. localPlayer.UserId .. "&w=48&h=48",
+	}, profile)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, avatar)
+
+	local profileTexts = create("Frame", {
+		Position = UDim2.fromOffset(44, 0),
+		Size = UDim2.new(1, -48, 1, 0),
+		BackgroundTransparency = 1,
+	}, profile)
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(0, 8),
+		Size = UDim2.new(1, 0, 0, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Text = localPlayer.DisplayName,
+	}, profileTexts)
+
+	State.profileRole = create("TextLabel", {
+		Position = UDim2.fromOffset(0, 24),
+		Size = UDim2.new(1, 0, 0, 14),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = ROLE_COLORS.Innocent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = "Innocent",
+	}, profileTexts)
+
+	local SEARCH_HEIGHT = IS_TOUCH and 50 or 42
+
+	local content = create("Frame", {
+		Position = UDim2.fromOffset(133, HEADER_HEIGHT + 1),
+		Size = UDim2.new(1, -133, 1, -(HEADER_HEIGHT + 1)),
+		BackgroundTransparency = 1,
+	}, mainFrame)
+
+	local searchBox = create("TextBox", {
+		Position = UDim2.fromOffset(10, 7),
+		Size = UDim2.new(1, -24, 0, SEARCH_HEIGHT - 14),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Gotham,
+		TextSize = TEXT_SIZE,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		PlaceholderText = "Search features...",
+		PlaceholderColor3 = THEME.subText,
+		Text = "",
+	}, content)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 10) }, searchBox)
+	create("UIStroke", { Color = THEME.stroke, Thickness = 1 }, searchBox)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, searchBox)
+
+	local pageArea = create("Frame", {
+		Position = UDim2.fromOffset(0, SEARCH_HEIGHT),
+		Size = UDim2.new(1, 0, 1, -SEARCH_HEIGHT),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+	}, content)
+
+	local emptyLabel = create("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 60),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = TEXT_SIZE,
+		TextColor3 = THEME.subText,
+		Text = "No matching features.",
+		Visible = false,
+	}, pageArea)
+
+	local pages, tabButtons, tabOrder = {}, {}, {}
+	State.pageFrames = pages
+
+	local function selectTab(name)
+		State.currentTab = name
+
+		for tabName, page in pages do
+			local active = tabName == name
+
+			if active and not page.Visible then
+				page.Visible = true
+				page.Position = UDim2.fromOffset(18, 0)
+				tween(page, { Position = UDim2.fromOffset(0, 0) }, 0.28, Enum.EasingStyle.Quint)
+			elseif not active then
+				page.Visible = false
+			end
+
+			tween(tabButtons[tabName], { TextColor3 = active and THEME.text or THEME.subText })
+		end
+
+		local index = table.find(tabOrder, name) or 1
+		tween(pill, { Position = UDim2.fromOffset(8, TAB_PAD + (index - 1) * (TAB_HEIGHT + TAB_GAP)) }, 0.28, Enum.EasingStyle.Quint)
+	end
+
+	local function addTab(name)
+		local button = create("TextButton", {
+			Size = UDim2.new(1, 0, 0, TAB_HEIGHT),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			Font = Enum.Font.GothamMedium,
+			TextSize = TEXT_SIZE,
+			TextColor3 = THEME.subText,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Text = name,
+			LayoutOrder = nextOrder(),
+		}, tabList)
+
+		create("UIPadding", { PaddingLeft = UDim.new(0, 16) }, button)
+
+		local page = create("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Active = true,
+			ScrollBarThickness = IS_TOUCH and 5 or 4,
+			ScrollBarImageTransparency = 0.2,
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.None,
+			Visible = false,
+		}, pageArea)
+
+		bindAccent(page, "ScrollBarImageColor3")
+
+		local layout = create("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 6),
+			PaddingBottom = UDim.new(0, 18),
+			PaddingLeft = UDim.new(0, 12),
+			PaddingRight = UDim.new(0, 16),
+		}, page)
+
+		State.maid:give(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 16)
+		end))
+
+		pages[name] = page
+		tabButtons[name] = button
+		State.pageNames[page] = name
+		table.insert(tabOrder, name)
+
+		State.maid:give(button.MouseButton1Click:Connect(function()
+			selectTab(name)
+		end))
+
+		return page
+	end
+
+	local function applySearch(query)
+		query = string.lower(query)
+
+		local total, pageMatches = 0, {}
+
+		for _, section in State.sections do
+			local titleMatch = query ~= "" and string.find(section.title, query, 1, true) ~= nil
+			local anyVisible = false
+
+			for _, entry in section.entries do
+				local visible = query == "" or titleMatch or string.find(entry.text, query, 1, true) ~= nil
+				entry.row.Visible = visible
+
+				if visible then
+					anyVisible = true
+					total += 1
+					pageMatches[section.pageName] = (pageMatches[section.pageName] or 0) + 1
+				end
+			end
+
+			section.card.Visible = query == "" or anyVisible
+
+			if query ~= "" and anyVisible and section.collapsed then
+				section.setCollapsed(false)
+			end
+		end
+
+		emptyLabel.Visible = query ~= "" and total == 0
+
+		for name, button in tabButtons do
+			tween(button, { TextTransparency = (query ~= "" and not pageMatches[name]) and 0.6 or 0 })
+		end
+
+		if query ~= "" and total > 0 and not pageMatches[State.currentTab] then
+			for _, name in tabOrder do
+				if pageMatches[name] then
+					selectTab(name)
+					break
+				end
+			end
+		end
+	end
+
+	State.maid:give(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		applySearch(searchBox.Text)
+	end))
+
+	-- Assigned once the quick-action dock exists further down; the toggles below call it as an
+	-- upvalue, which is why it is declared here instead of where it is actually built.
+	local updateDockVisible = nil
+
+	-- Silent Aim tab.
+	local aimPage = addTab("Silent Aim")
+
+	local statusBody = addSection(aimPage, "Live Status")
+
+	addLive(statusBody, "Murderer", function()
+		local murderer = Roles.murdererPlayer()
+		return murderer and murderer.Name or "Unknown"
+	end)
+
+	addLive(statusBody, "Your Role", function()
+		return State.myRole
+	end)
+
+	addLive(statusBody, "Gun", function()
+		if State.holdingGun then
+			return "Equipped"
+		end
+
+		return State.hasGun and "In backpack" or "None"
+	end)
+
+	addLive(statusBody, "Ping / Lead", function()
+		return string.format("%d ms / %d ms", getPing(), math.floor(Predictor.lastLead * 1000 + 0.5))
+	end)
+
+	addLive(statusBody, "Target Speed", function()
+		return string.format("%.1f studs/s", Predictor.lastSpeed)
+	end)
+
+	addLive(statusBody, "Learned Gain", function()
+		return string.format("x%.2f", Predictor.tune)
+	end)
+
+	addLive(statusBody, "Target Profile", function()
+		local player = State.targetPlayer
+		local profile = player and Profiles.cache[player]
+
+		if not profile then
+			return player and "Normal" or "No target"
+		end
+
+		local tags = {}
+
+		if profile.camper then
+			table.insert(tags, "Camper")
+		end
+
+		if profile.spam then
+			table.insert(tags, "Spam Jump")
+		end
+
+		if profile.mini then
+			table.insert(tags, "Mini")
+		end
+
+		return #tags > 0 and table.concat(tags, " + ") or "Normal"
+	end)
+
+	addLive(statusBody, "Gun Drop", function()
+		local distance = GunEsp.nearestDistance()
+		return distance and string.format("%d m away", math.floor(distance)) or "None"
+	end)
+
+	addLive(statusBody, "Config", function()
+		return State.configLoaded and "Saved config" or "Defaults"
+	end)
+
+	addLive(statusBody, "Shots Redirected", function()
+		return tostring(State.shotsRedirected)
+	end)
+
+	addLive(statusBody, "Hit Rate", function()
+		if Silent.total == 0 then
+			return "No shots yet"
+		end
+
+		return string.format("%d / %d (%d%%)", Silent.hits, Silent.total, math.floor(Silent.hits / Silent.total * 100 + 0.5))
+	end)
+
+	addLive(statusBody, "Hook", function()
+		return State.hookInstalled and "Active" or "Unavailable"
+	end)
+
+	addInfo(statusBody, "The advanced sections below start closed to keep this page short. Tap a section header to open it, or use the search box.")
+
+	local silentBody = addSection(aimPage, "Silent Aim")
+	addToggle(silentBody, "Silent Aim", "silentAim")
+	addToggle(silentBody, "Murderer Only", "silentMurdererOnly")
+	addCycle(silentBody, "Hit Part", "hitPart", OPTIONS.hitParts)
+	addSlider(silentBody, "Hit Chance", "hitChance", 1, 100, 1, { suffix = "%" })
+	addSlider(silentBody, "Max Distance", "silentMaxDistance", 100, 2000, 50)
+	addToggle(silentBody, "Limit To FOV", "silentUseFov")
+	addSlider(silentBody, "FOV Radius", "silentFov", 50, 900, 10)
+	addToggle(silentBody, "Show FOV Ring", "fovVisible")
+	addToggle(silentBody, "Wall Check", "wallCheck")
+	addToggle(silentBody, "Aim Visible Part When Hidden", "partFallback")
+	addSlider(silentBody, "Head Only Below Lead", "headMaxLead", 0, 8, 0.5, { suffix = " studs" })
+	addInfo(silentBody, "Shots fired with the sheriff gun go where the prediction says the murderer will be, even if you aim somewhere else. It only acts while you hold the gun. The SILENT and SHOOT buttons, the keys below and the top banner all use the same switch.")
+
+	local buttonBody = addSection(aimPage, "Buttons And Keys", true)
+
+	addToggle(buttonBody, "Show SILENT Button", "showSilentButton", function(enabled)
+		if State.silentButton then
+			State.silentButton.Visible = enabled
+		end
+
+		if updateDockVisible then
+			updateDockVisible()
+		end
+	end)
+
+	addToggle(buttonBody, "Show SHOOT Button", "showShootButton", function(enabled)
+		if State.shootButton then
+			State.shootButton.Visible = enabled
+		end
+
+		if updateDockVisible then
+			updateDockVisible()
+		end
+	end)
+
+	addButton(buttonBody, "Shoot Murderer Now", function()
+		task.spawn(function()
+			local ok, reason = Silent.shoot()
+
+			if not ok then
+				notify("Shoot", tostring(reason), "error")
+			end
+		end)
+	end)
+
+	addToggle(buttonBody, "Show GUN Button", "showGunButton", function(enabled)
+		if State.gunButton then
+			State.gunButton.Visible = enabled
+		end
+
+		if updateDockVisible then
+			updateDockVisible()
+		end
+	end)
+
+	addButton(buttonBody, "Get Gun", function()
+		task.spawn(function()
+			local ok, reason = GunGrab.run()
+			notify("Get Gun", ok and "Picked up the gun" or tostring(reason), ok and "success" or "error")
+		end)
+	end)
+
+	addCycle(buttonBody, "Gun Grab Method", "gunGrabMethod", OPTIONS.grab)
+	addCycle(buttonBody, "Get Gun Key", "gunKeybind", OPTIONS.keys)
+	addCycle(buttonBody, "Silent Toggle Key", "silentKeybind", OPTIONS.keys)
+	addCycle(buttonBody, "Shoot Key", "shootKeybind", OPTIONS.keys)
+	addInfo(buttonBody, "SHOOT equips the gun if it is in your backpack and fires one predicted shot at whoever the targeting settings pick, so it follows the same rules as silent aim. GUN picks up a dropped gun: Touch grabs it from where you stand, Teleport steps onto it and straight back, Auto tries Touch first. The murderer cannot pick the gun up.")
+
+	local predictBody = addSection(aimPage, "Prediction", true)
+	addToggle(predictBody, "Prediction", "predictionEnabled")
+	addCycle(predictBody, "Mode", "predictionMode", OPTIONS.modes)
+	addSlider(predictBody, "Ping Compensation", "leadPing", 0, 200, 5, { suffix = "%" })
+	addSlider(predictBody, "Extra Lead", "leadExtra", 0, 200, 5, { suffix = "ms" })
+	addSlider(predictBody, "Max Lead", "leadMax", 5, 60, 1, { suffix = " studs" })
+	addSlider(predictBody, "Motion Window", "predictionWindow", 80, 300, 10, { suffix = "ms" })
+	addSlider(predictBody, "Acceleration", "accelWeight", 0, 100, 5, { suffix = "%" })
+	addSlider(predictBody, "Reverse Damping", "reverseDamp", 0, 100, 5, { suffix = "%" })
+	addSlider(predictBody, "Vertical Cap", "verticalCap", 4, 24, 1, { suffix = " studs" })
+	addToggle(predictBody, "Air Prediction", "airPrediction")
+	addToggle(predictBody, "Clamp Lead At Walls", "leadWallClamp")
+	addToggle(predictBody, "Auto-Tune", "autoTune")
+	addToggle(predictBody, "Show Prediction Marker", "predictionMarker")
+	addButton(predictBody, "Reset Learned Gain", function()
+		Predictor.reset()
+		notify("Prediction", "Learned gain reset to x1.00.", "info")
+	end)
+	addInfo(predictBody, "What you see on screen is the target a moment ago: your ping plus their own delay. The lead is your round trip times Ping Compensation, plus Extra Lead. Smart mode measures velocity and acceleration over the Motion Window, ignores standing jitter, halves the lead when they reverse direction, follows jumps with gravity, and refuses to lead teleports. Auto-Tune compares each prediction with where the target really went and slowly corrects the gain (shown as Learned Gain). The yellow ring is where the shot will land. I could not test this against a live server, so treat the defaults as a starting point and adjust Extra Lead first.")
+
+	local profileBody = addSection(aimPage, "Target Profiles", true)
+	addToggle(profileBody, "Smart Profiles", "profilesEnabled")
+	addSlider(profileBody, "Mini Avatar Height", "miniHeight", 2, 6, 0.5, { suffix = " studs" })
+	addSlider(profileBody, "Spam Jump Jumps", "spamJumpCount", 2, 5, 1)
+	addSlider(profileBody, "Spam Jump Vertical Lead", "spamJumpDamp", 0, 100, 5, { suffix = "%" })
+	addSlider(profileBody, "Camper Hold Time", "camperTime", 100, 1500, 50, { suffix = "ms" })
+	addSlider(profileBody, "Standing Still Speed", "stillThreshold", 1, 30, 1, { suffix = "%" })
+	addInfo(profileBody, "Detects three awkward targets and tunes the shot for each. Mini avatars (shorter than the height above) get torso aim and a vertical cap scaled to their size. Spam jumpers, with that many take-offs in under two seconds, are aimed at the middle of their jump arc and only keep the chosen share of the vertical lead. Campers, standing still for the hold time, get no lead and a jitter-smoothed position, with head aim when it is visible. Auto and Random hit parts follow the profile, an explicit Head or Torso choice is always obeyed. Every number is part of the saved config.")
+
+	local logicBody = addSection(aimPage, "Target Logic", true)
+	addCycle(logicBody, "Priority", "priority", OPTIONS.priority)
+	addToggle(logicBody, "Sticky Target", "stickyTarget")
+	addToggle(logicBody, "Target Line", "targetLine")
+
+	local compatBody = addSection(aimPage, "Compatibility", true)
+	addToggle(compatBody, "Legacy Ray Redirect", "legacyRedirect", function(enabled)
+		if enabled then
+			Silent.ensureIndexHook()
+		end
+	end)
+	addInfo(compatBody, "Off by default. Also redirects ray based aiming and Mouse.Hit. Only turn it on if shots are not being redirected, because it runs on every raycast the game makes.")
+
+	task.wait()
+
+	local espPage = addTab("ESP")
+	local espBody = addSection(espPage, "Player ESP")
+	addToggle(espBody, "Enabled", "espEnabled")
+	addToggle(espBody, "Boxes", "espBoxes")
+	addToggle(espBody, "Names", "espNames")
+	addToggle(espBody, "Roles", "espRoles")
+	addToggle(espBody, "Weapon", "espWeapon")
+	addToggle(espBody, "Health Bar", "espHealth")
+	addToggle(espBody, "Distance", "espDistance")
+	addToggle(espBody, "Tracers", "espTracers")
+	addToggle(espBody, "Chams", "espChams")
+	addSlider(espBody, "Max Distance", "espMaxDistance", 100, 3000, 50)
+	addInfo(espBody, "Red: Murderer. Blue: Sheriff. Green: Innocent. Roles come from the server, so they show before a weapon is drawn. Box height follows each avatar's real size, so mini avatars get a matching box.")
+
+	local gunBody = addSection(espPage, "Gun ESP")
+	addToggle(gunBody, "Gun ESP", "gunEsp")
+	addToggle(gunBody, "Gun Chams", "gunEspChams")
+	addToggle(gunBody, "Gun Tracer", "gunEspTracer")
+	addToggle(gunBody, "Gun Drop Alert", "gunAlert")
+	addInfo(gunBody, "Marks the sheriff's gun when it drops on the map. A gun that is off screen sticks to the screen edge and points the way, with its distance. It is found by the name \"GunDrop\", which I could not check against the live game, so if no gun ever shows up tell me what the dropped gun is called.")
+
+	task.wait()
+
+	local bombPage = addTab("Bomb Jump")
+	local bombBody = addSection(bombPage, "Bomb Jump")
+	addToggle(bombBody, "Auto-Throw On Tap", "bombJumpEnabled")
+	addSlider(bombBody, "Cooldown", "bombCooldown", 1, 60, 1, { suffix = "s" })
+
+	addToggle(bombBody, "Show BOMB Button", "showBombButton", function(enabled)
+		if State.bombQuickButton then
+			State.bombQuickButton.Visible = enabled
+		end
+
+		if updateDockVisible then
+			updateDockVisible()
+		end
+	end)
+
+	addButton(bombBody, "Throw Now", function()
+		task.spawn(function()
+			if not (State.bombController and State.bombController.throw()) then
+				notify("Bomb Jump", "No FakeBomb found and could not fetch one.", "error")
+			end
+		end)
+	end)
+
+	addInfo(bombBody, "Uses the tool named \"FakeBomb\". If you are not holding one, it asks the server for it first. Auto-Throw On Tap fires it whenever you tap the screen while holding it.")
+
+	local goldBombBody = addSection(bombPage, "Gold Bomb Jump")
+	addToggle(goldBombBody, "Auto-Throw On Tap", "goldBombJumpEnabled")
+	addSlider(goldBombBody, "Cooldown", "goldBombCooldown", 1, 30, 1, { suffix = "s" })
+
+	addToggle(goldBombBody, "Show GOLD Button", "showGoldButton", function(enabled)
+		if State.goldQuickButton then
+			State.goldQuickButton.Visible = enabled
+		end
+
+		if updateDockVisible then
+			updateDockVisible()
+		end
+	end)
+
+	addButton(goldBombBody, "Throw Now", function()
+		task.spawn(function()
+			if not (State.goldBombController and State.goldBombController.throw()) then
+				notify("Gold Bomb Jump", "No GoldBomb found and could not fetch one.", "error")
+			end
+		end)
+	end)
+
+	addInfo(goldBombBody, "Same idea with the tool named \"GoldBomb\". It runs independently, so you can enable either or both.")
+
+	task.wait()
+
+	local settingsPage = addTab("Settings")
+	local interfaceBody = addSection(settingsPage, "Interface")
+	addCycle(interfaceBody, "Theme", "theme", THEME_NAMES, applyTheme)
+	addToggle(interfaceBody, "Watermark", "watermark")
+	addToggle(interfaceBody, "Intro Animation", "intro")
+
+	addToggle(interfaceBody, "Launcher Button", "launcher", function()
+		State.syncInterface()
+	end)
+
+	addSlider(interfaceBody, "Menu Scale", "uiScale", 60, 120, 5, {
+		suffix = "%",
+		onChange = function()
+			State.syncInterface()
+		end,
+	})
+
+	local configBody = addSection(settingsPage, "Config")
+	addToggle(configBody, "Auto Load On Start", "autoLoad")
+
+	addButton(configBody, "Save Config", function()
+		if saveConfig() then
+			notify("Config", "Saved to " .. CONFIG_PATH, "success")
+		else
+			notify("Config", "Could not save the config.", "error")
+		end
+	end)
+
+	addButton(configBody, "Load Config", function()
+		if loadConfig() then
+			notify("Config", "Loaded your saved config.", "success")
+		else
+			notify("Config", "No saved config found.", "error")
+		end
+	end)
+
+	addButton(configBody, "Copy Config", function()
+		if pcall(setclipboard, httpService:JSONEncode(State.config)) then
+			notify("Config", "Copied to your clipboard.", "success")
+		else
+			notify("Config", "Clipboard is not available.", "error")
+		end
+	end)
+
+	addButton(configBody, "Reset To Defaults", function()
+		resetConfig()
+		notify("Config", "Everything was reset.", "info")
+	end, THEME.danger)
+
+	local scriptBody = addSection(settingsPage, "Script")
+	addInfo(scriptBody, IS_TOUCH and "Tap the logo button to show or hide the menu. Drag the title bar to move it." or "Press RightShift or Insert to show or hide the menu. Drag the title bar to move it.")
+
+	local unloadConfirmUntil = 0
+
+	addButton(scriptBody, "Unload", function()
+		if os.clock() > unloadConfirmUntil then
+			unloadConfirmUntil = os.clock() + 3
+			notify("Unload", "Tap Unload again within 3 seconds to confirm.", "info")
+			return
+		end
+
+		AstraHub.detach()
+	end, THEME.danger)
+
+	local aboutBody = addSection(settingsPage, "About", true)
+
+	local aboutRow = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 84),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, aboutBody)
+
+	local aboutLogo = addLogo(aboutRow, 72)
+	aboutLogo.Position = UDim2.fromOffset(6, 6)
+
+	local aboutTitle = create("TextLabel", {
+		Position = UDim2.fromOffset(90, 10),
+		Size = UDim2.new(1, -96, 0, 24),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = "Astra Hub",
+	}, aboutRow)
+
+	registerGradient(create("UIGradient", {}, aboutTitle))
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(90, 38),
+		Size = UDim2.new(1, -96, 0, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = VERSION .. "  |  Murder Mystery 2",
+	}, aboutRow)
+
+	create("TextLabel", {
+		Position = UDim2.fromOffset(90, 56),
+		Size = UDim2.new(1, -96, 0, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = THEME.subText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Text = "Silent aim, prediction, ESP, gun tools and bomb jump.",
+	}, aboutRow)
+
+	task.wait()
+	selectTab("Silent Aim")
+	makeDraggable(titleBar, window)
+	installScrollFallback(pageArea, pages)
+	createWatermark(screenGui)
+
+	local function setMenuVisible(visible)
+		State.menuVisible = visible
+		State.menuToken += 1
+
+		local token = State.menuToken
+
+		if visible then
+			window.Visible = true
+			tween(mainFrame, { GroupTransparency = 0 }, 0.22)
+			tween(popScale, { Scale = 1 }, 0.3, Enum.EasingStyle.Back)
+			return
+		end
+
+		tween(mainFrame, { GroupTransparency = 1 }, 0.18)
+		tween(popScale, { Scale = 0.92 }, 0.18)
+
+		task.delay(0.2, function()
+			if State.detached or State.menuToken ~= token then
+				return
+			end
+
+			window.Visible = false
+		end)
+	end
+
+	local launcherSize = IS_TOUCH and 52 or 44
+
+	local launcher = create("TextButton", {
+		Position = UDim2.new(0, 14, 0.4, 0),
+		Size = UDim2.fromOffset(launcherSize, launcherSize),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "",
+		Visible = State.config.launcher,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(1, 0) }, launcher)
+
+	local launcherLogo = addLogo(launcher, launcherSize - 8)
+	launcherLogo.Position = UDim2.fromOffset(4, 4)
+
+	local launcherStroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2 }, launcher)
+	registerGradient(create("UIGradient", {}, launcherStroke), true)
+
+	makeDraggable(launcher, launcher, function()
+		setMenuVisible(not State.menuVisible)
+	end)
+
+	-- One horizontal dock holds every quick-action icon. Each icon shows its name and a live status
+	-- line (ON/OFF, cooldown seconds, a gun on the map). UIListLayout skips hidden children, so the
+	-- dock shrinks to the icons that are on, and it is clamped to the screen so no icon can end up
+	-- out of reach.
+	local DOCK_ICON_SIZE = IS_TOUCH and 60 or 52
+	local DOCK_GAP = 8
+	local DOCK_PADDING = 8
+
+	-- With the launcher hidden there is nothing to sit under, so the dock takes its place.
+	local dockOffset = State.config.launcher and (launcherSize + 14) or 0
+
+	local dock = create("Frame", {
+		Position = UDim2.new(0, 14, 0.4, dockOffset),
+		Size = UDim2.fromOffset(DOCK_ICON_SIZE + DOCK_PADDING * 2, DOCK_ICON_SIZE + DOCK_PADDING * 2),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = THEME.card,
+		BackgroundTransparency = 0.05,
+		BorderSizePixel = 0,
+		Active = true,
+	}, screenGui)
+
+	create("UICorner", { CornerRadius = UDim.new(0, 12) }, dock)
+	local dockStroke = create("UIStroke", { Color = THEME.accent, Thickness = 1.5 }, dock)
+	registerGradient(create("UIGradient", {}, dockStroke))
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, DOCK_GAP),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, dock)
+
+	create("UIPadding", {
+		PaddingLeft = UDim.new(0, DOCK_PADDING),
+		PaddingRight = UDim.new(0, DOCK_PADDING),
+		PaddingTop = UDim.new(0, DOCK_PADDING),
+		PaddingBottom = UDim.new(0, DOCK_PADDING),
+	}, dock)
+
+	-- Dragging grabs the dock itself; each icon below still gets its own click since Roblox routes
+	-- input to the topmost object under the pointer, and the icons sit on top of this frame.
+	makeDraggable(dock, dock, nil)
+
+	---@param title string
+	---@param sub string
+	---@param order number
+	---@param visible boolean
+	---@param onTap function
+	---@return table
+	local function addDockIcon(title, sub, order, visible, onTap)
+		local button = create("TextButton", {
+			Size = UDim2.fromOffset(DOCK_ICON_SIZE, DOCK_ICON_SIZE),
+			BackgroundColor3 = THEME.element,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			Text = "",
+			Visible = visible,
+			LayoutOrder = order,
+		}, dock)
+
+		create("UICorner", { CornerRadius = UDim.new(0, 10) }, button)
+
+		local stroke = create("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.3 }, button)
+		registerGradient(create("UIGradient", {}, stroke), true)
+
+		create("TextLabel", {
+			Position = UDim2.fromOffset(0, IS_TOUCH and 12 or 10),
+			Size = UDim2.new(1, 0, 0, 16),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBlack,
+			TextSize = IS_TOUCH and 12 or 11,
+			TextColor3 = THEME.text,
+			Text = title,
+		}, button)
+
+		local subLabel = create("TextLabel", {
+			Position = UDim2.new(0, 0, 1, -(IS_TOUCH and 26 or 24)),
+			Size = UDim2.new(1, 0, 0, 14),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			TextSize = 9,
+			TextColor3 = THEME.subText,
+			Text = sub,
+		}, button)
+
+		-- A small press animation so a tap is felt even before the action finishes.
+		local pressScale = create("UIScale", { Scale = 1 }, button)
+
+		State.maid:give(button.MouseButton1Down:Connect(function()
+			tween(pressScale, { Scale = 0.93 }, 0.08)
+		end))
+
+		local function release()
+			tween(pressScale, { Scale = 1 }, 0.14, Enum.EasingStyle.Back)
+		end
+
+		State.maid:give(button.MouseButton1Up:Connect(release))
+		State.maid:give(button.MouseLeave:Connect(release))
+
+		State.maid:give(button.MouseButton1Click:Connect(function()
+			if isScrolling() then
+				return
+			end
+
+			onTap()
+		end))
+
+		return { button = button, sub = subLabel }
+	end
+
+	---@param button TextButton
+	---@param ok boolean
+	local function flashQuickButton(button, ok)
+		tween(button, { BackgroundColor3 = ok and THEME.success or THEME.danger }, 0.12)
+
+		task.delay(0.35, function()
+			if not State.detached then
+				tween(button, { BackgroundColor3 = THEME.element }, 0.25)
+			end
+		end)
+	end
+
+	local silentIcon = addDockIcon("SILENT", "OFF", 1, State.config.showSilentButton, function()
+		State.config.silentAim = not State.config.silentAim
+		refreshAll()
+		notify("Silent Aim", State.config.silentAim and "Enabled" or "Disabled", State.config.silentAim and "success" or "info")
+	end)
+
+	State.silentButton = silentIcon.button
+	State.dockSubs.silent = silentIcon.sub
+
+	local shootIcon = addDockIcon("SHOOT", "FIRE", 2, State.config.showShootButton, function()
+		task.spawn(function()
+			local ok, reason = Silent.shoot()
+			flashQuickButton(State.shootButton, ok)
+
+			if not ok and reason ~= "Too fast" then
+				notify("Shoot", tostring(reason), "error")
+			end
+		end)
+	end)
+
+	State.shootButton = shootIcon.button
+
+	local bombIcon = addDockIcon("BOMB", "READY", 3, State.config.showBombButton, function()
+		task.spawn(function()
+			local ok = State.bombController and State.bombController.throw()
+			flashQuickButton(State.bombQuickButton, ok)
+
+			if not ok then
+				notify("Bomb Jump", "No FakeBomb found, or the throw is still on cooldown.", "error")
+			end
+		end)
+	end)
+
+	State.bombQuickButton = bombIcon.button
+	State.dockSubs.bomb = bombIcon.sub
+
+	local goldIcon = addDockIcon("GOLD", "READY", 4, State.config.showGoldButton, function()
+		task.spawn(function()
+			local ok = State.goldBombController and State.goldBombController.throw()
+			flashQuickButton(State.goldQuickButton, ok)
+
+			if not ok then
+				notify("Gold Bomb Jump", "No GoldBomb found, or the throw is still on cooldown.", "error")
+			end
+		end)
+	end)
+
+	State.goldQuickButton = goldIcon.button
+	State.dockSubs.gold = goldIcon.sub
+
+	local gunIcon = addDockIcon("GUN", "GRAB", 5, State.config.showGunButton, function()
+		task.spawn(function()
+			local ok, reason = GunGrab.run()
+			flashQuickButton(State.gunButton, ok)
+			notify("Get Gun", ok and "Picked up the gun" or tostring(reason), ok and "success" or "error")
+		end)
+	end)
+
+	State.gunButton = gunIcon.button
+	State.dockSubs.gun = gunIcon.sub
+
+	-- The throw controllers show cooldown seconds and READY on their own icon.
+	if State.bombController then
+		State.bombController.label = State.dockSubs.bomb
+	end
+
+	if State.goldBombController then
+		State.goldBombController.label = State.dockSubs.gold
+	end
+
+	-- Assigns the real body now that the dock and icons exist; the toggles above already hold
+	-- this as an upvalue and only call it later, once the user actually taps one of them.
+	updateDockVisible = function()
+		dock.Visible = State.config.showSilentButton
+			or State.config.showShootButton
+			or State.config.showBombButton
+			or State.config.showGoldButton
+			or State.config.showGunButton
+
+		task.defer(function()
+			if not State.detached then
+				keepOnScreen(dock)
+			end
+		end)
+	end
+
+	updateDockVisible()
+
+	task.defer(function()
+		if not State.detached then
+			keepOnScreen(launcher)
+		end
+	end)
+
+	local function refreshSilentButton()
+		local enabled = State.config.silentAim
+		tween(State.silentButton, { BackgroundColor3 = enabled and THEME.success or THEME.element }, 0.2)
+		State.dockSubs.silent.Text = enabled and "ON" or "OFF"
+		State.dockSubs.silent.TextColor3 = enabled and THEME.text or THEME.subText
+	end
+
+	table.insert(State.refreshers, refreshSilentButton)
+	refreshSilentButton()
+
+	local function applyResponsive()
+		local camera = workspace.CurrentCamera
+
+		if not camera then
+			return
+		end
+
+		local viewport = camera.ViewportSize
+		local scale = State.config.uiScale / 100
+		local width = math.clamp(viewport.X * 0.85 / scale, 340, 680)
+		local height = math.clamp(viewport.Y * 0.85 / scale, 280, 480)
+		local compact = width < 560
+		local sidebarWidth = compact and 92 or 132
+
+		scaler.Size = UDim2.fromOffset(width, height)
+		window.Size = UDim2.fromOffset(width * scale, height * scale)
+		sidebar.Size = UDim2.new(0, sidebarWidth, 1, -(HEADER_HEIGHT + 1))
+		divider.Position = UDim2.fromOffset(sidebarWidth, HEADER_HEIGHT + 1)
+		content.Position = UDim2.fromOffset(sidebarWidth + 1, HEADER_HEIGHT + 1)
+		content.Size = UDim2.new(1, -(sidebarWidth + 1), 1, -(HEADER_HEIGHT + 1))
+		subtitleChip.Visible = not compact
+		headerPills.Visible = not compact
+		profileTexts.Visible = not compact
+		keepOnScreen(dock)
+	end
+
+	State.syncInterface = function()
+		windowScale.Scale = State.config.uiScale / 100
+		launcher.Visible = State.config.launcher
+		applyResponsive()
+	end
+
+	local camera = workspace.CurrentCamera
+
+	if camera then
+		State.maid:give(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
+	end
+
+	State.maid:give(closeButton.MouseButton1Click:Connect(function()
+		setMenuVisible(false)
+		notify("Menu hidden", IS_TOUCH and "Tap the logo button to reopen." or "Press RightShift or Insert to reopen.", "info")
+	end))
+
+	State.maid:give(userInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed or not MENU_TOGGLE_KEYS[input.KeyCode] then
+			return
+		end
+
+		setMenuVisible(not State.menuVisible)
+	end))
+
+	applyResponsive()
+
+	local autoLoaded = State.configLoaded == true
+
+	local function openMenu()
+		setMenuVisible(true)
+		notify("Astra Hub", "Loaded successfully.", "success")
+
+		if autoLoaded then
+			notify("Config", "Auto-loaded your saved config.", "info")
+		end
+	end
+
+	local introStarted = State.config.intro and pcall(playIntro, screenGui, openMenu)
+
+	if not introStarted then
+		if State.introOverlay then
+			State.introOverlay:Destroy()
+			State.introOverlay = nil
+		end
+
+		openMenu()
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Startup and shutdown.
+--------------------------------------------------------------------------------
+
+---@param name string
+---@param callback function
+local function runStage(name, callback)
+	local success, result = xpcall(callback, function(message)
+		return tostring(message) .. "\n" .. debug.traceback()
+	end)
+
+	if success then
+		return
+	end
+
+	table.insert(State.errors, name .. ": " .. tostring(result))
+	warn("Astra Hub stage failed: " .. name)
+	warn(result)
+end
+
+local function showErrors()
+	if #State.errors == 0 then
+		return
+	end
+
+	pcall(function()
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "AstraHubMM2Errors"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.DisplayOrder = 1000
+		gui.Parent = State.guiParent or getGuiParent()
+
+		local box = Instance.new("TextButton")
+		box.AnchorPoint = Vector2.new(0.5, 0)
+		box.Position = UDim2.new(0.5, 0, 0, 20)
+		box.Size = UDim2.new(0.92, 0, 0, 0)
+		box.AutomaticSize = Enum.AutomaticSize.Y
+		box.BackgroundColor3 = Color3.fromRGB(40, 12, 16)
+		box.BorderSizePixel = 0
+		box.Font = Enum.Font.Code
+		box.TextSize = 12
+		box.TextColor3 = Color3.fromRGB(255, 170, 170)
+		box.TextWrapped = true
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.TextYAlignment = Enum.TextYAlignment.Top
+		box.Text = string.sub("Astra Hub had problems loading (tap to close):\n\n" .. table.concat(State.errors, "\n\n"), 1, 1200)
+		box.Parent = gui
+
+		box.MouseButton1Click:Connect(function()
+			gui:Destroy()
+		end)
+	end)
+end
+
+---Load a logo from the workspace folder when one is there. No logo falls back to a drawn letter.
+---@return string?
+local function loadLogo()
+	local success, asset = pcall(function()
+		if isfile(LOGO_PATH) then
+			return getcustomasset(LOGO_PATH)
+		end
+
+		return nil
+	end)
+
+	return success and asset or nil
+end
+
+function AstraHub.init()
+	task.wait()
+
+	if not game:IsLoaded() then
+		game.Loaded:Wait()
+	end
+
+	State.noDrawing = not pcall(function()
+		Drawing.new("Line"):Remove()
+	end)
+
+	State.logoAsset = loadLogo()
+	task.wait()
+
+	runStage("bomb controllers", function()
+		State.bombController = createBombController(NORMAL_BOMB_NAME, "bombCooldown")
+		State.goldBombController = createBombController(GOLD_BOMB_NAME, "goldBombCooldown")
+	end)
+
+	-- Load the saved config first, so the hooks, targeting and menu all start from it.
+	runStage("config", function()
+		State.configLoaded = loadConfig(true)
+	end)
+
+	runStage("menu", createMenu)
+	task.wait()
+
+	runStage("players", function()
+		for _, player in playersService:GetPlayers() do
+			addEsp(player)
+		end
+
+		State.maid:give(playersService.PlayerAdded:Connect(addEsp))
+		State.maid:give(playersService.PlayerRemoving:Connect(removePlayer))
+	end)
+
+	runStage("gun esp", GunEsp.start)
+
+	runStage("loops", function()
+		State.maid:give(runService.RenderStepped:Connect(onRender))
+	end)
+
+	task.wait()
+	runStage("silent aim hook", Silent.install)
+	runStage("keybinds", installKeybinds)
+	runStage("bomb taps", installBombTapListener)
+	showErrors()
+
+	if not State.hookInstalled then
+		notify("Silent Aim", "This executor has no hookmetamethod, only the SHOOT button works.", "error")
+	end
+
+	if State.noDrawing then
+		notify("Compatibility", "No Drawing library. ESP uses chams and name tags.", "info")
+	end
+end
+
+function AstraHub.detach()
+	State.detached = true
+	State.target = nil
+	Silent.uninstall()
+	State.maid:clean()
+
+	for _, esp in State.esp do
+		esp:destroy()
+	end
+
+	State.esp = {}
+	GunEsp.clear()
+	State.fovRing = nil
+	State.targetLine = nil
+	State.targetDot = nil
+	State.predictionDot = nil
+	State.notifyImpl = nil
+end
+
+---@param error any
+local function onInitializeError(error)
+	table.insert(State.errors, "init: " .. tostring(error))
+	warn("Failed to initialize.")
+	warn(error)
+	warn(debug.traceback())
+	showErrors()
+	AstraHub.detach()
+end
+
+if shared.AstraHubMM2 then
+	pcall(shared.AstraHubMM2.detach)
+end
+
+shared.AstraHubMM2 = AstraHub
+xpcall(AstraHub.init, onInitializeError)
